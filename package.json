@@ -1,0 +1,40 @@
+{
+  "scripts": {
+    "dev": "next dev",
+    "dev:api": "node server/index.js",
+    "dev:all": "concurrently \"npm run dev:api\" \"npm run dev\"",
+    "build": "next build",
+    "start": "next start",
+    "start:api": "node server/index.js",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@types/selenium-webdriver": "^4.35.6",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "html2canvas": "^1.4.1",
+    "https-proxy-agent": "^9.1.0",
+    "jspdf": "^4.2.1",
+    "lucide-react": "^1.21.0",
+    "mysql2": "^3.22.5",
+    "next": "^16.2.9",
+    "node-fetch": "^3.3.2",
+    "nodemailer": "^9.0.1",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "selenium-webdriver": "^4.45.0",
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3",
+    "sweetalert2": "^11.26.25",
+    "zca-js": "^2.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.32",
+    "@types/react": "19.1.8",
+    "@types/react-dom": "19.1.6",
+    "concurrently": "^10.0.3",
+    "typescript": "5.8.3"
+  }
+}

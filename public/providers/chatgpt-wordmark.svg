@@ -1,0 +1,12 @@
+<svg width="520" height="170" viewBox="0 0 520 170" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="520" height="170" rx="0" fill="#F7F7F5"/>
+  <rect x="30" y="32" width="106" height="106" rx="28" fill="#10A37F"/>
+  <g stroke="#fff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M83 52c14 0 25 10 27 23 13-4 27 5 30 18 4 15-5 30-20 35-5 13-18 21-32 18-11 10-28 10-39 0-12-11-14-29-5-42-8-15-3-34 12-43 8-5 18-6 27-3Z"/>
+    <path d="M110 75 76 95v39"/>
+    <path d="M55 94 88 75l34 20"/>
+    <path d="M56 120 89 139l33-20"/>
+    <path d="M89 75v40l34 19"/>
+  </g>
+  <text x="176" y="106" fill="#060606" font-family="Inter, Arial, Helvetica, sans-serif" font-size="62" font-weight="800" letter-spacing="-1">ChatGPT</text>
+</svg>

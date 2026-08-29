@@ -1,0 +1,21 @@
+{
+  "name": "TECHMAX AI",
+  "short_name": "TECHMAX AI",
+  "description": "Nền tảng tự động hóa chăm sóc khách hàng bằng AI.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#111827",
+  "icons": [
+    {
+      "src": "/favicon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/favicon.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

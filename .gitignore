@@ -1,0 +1,9 @@
+.next
+node_modules
+out
+dist
+.env*
+.stitch-export
+*.log
+server/*.log
+uploads/
