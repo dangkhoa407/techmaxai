@@ -3516,6 +3516,33 @@ export async function fetchLoginSessions() {
   return payload.sessions || [];
 }
 
+export function fixCorruptedText(text?: string | null): string {
+  if (!text || typeof text !== "string") return "";
+  if (!text.includes("?")) return text;
+  return text
+    .replace(/T\?i kho\?n/g, "Tài khoản")
+    .replace(/Qu\?t tin nh\?n/g, "Quét tin nhắn")
+    .replace(/Qu\?t Tin Nh\?n/g, "Quét Tin Nhắn")
+    .replace(/Qu\?t/g, "Quét")
+    .replace(/tin nh\?n/g, "tin nhắn")
+    .replace(/Tin Nh\?n/g, "Tin Nhắn")
+    .replace(/b\?ng/g, "bằng")
+    .replace(/ho\?c/g, "hoặc")
+    .replace(/b\? qua/g, "bỏ qua")
+    .replace(/s\? kiện/g, "sự kiện")
+    .replace(/ t\? /g, " từ ")
+    .replace(/Kh\?ng t\?m th\?y t\?i kho\?n/g, "Không tìm thấy tài khoản")
+    .replace(/\?\? y\?u c\?u/g, "Đã yêu cầu")
+    .replace(/ri\?ng \?\? b\?t/g, "riêng để bắt")
+    .replace(/t\? g\?i t\?/g, "tự gửi từ")
+    .replace(/kh\?i/g, "khỏi")
+    .replace(/di\?n tho\?i/g, "điện thoại")
+    .replace(/\?ng d\?ng/g, "ứng dụng")
+    .replace(/dang nh\?p/g, "đăng nhập")
+    .replace(/d\? dang nh\?p/g, "để đăng nhập")
+    .replace(/ch\? b\?n/g, "chờ bạn");
+}
+
 export async function fetchActivityLogs(page = 1, search = "", limit = 10): Promise<ActivityLogPayload> {
   const token = getToken();
   if (!token) throw new Error("Bạn cần đăng nhập.");
@@ -3532,8 +3559,18 @@ export async function fetchActivityLogs(page = 1, search = "", limit = 10): Prom
     })
   );
 
+  const rawLogs = payload.logs || [];
+  const cleanedLogs = rawLogs.map((item: any) => ({
+    ...item,
+    subject: fixCorruptedText(item.subject),
+    action: fixCorruptedText(item.action),
+    actor: fixCorruptedText(item.actor),
+    target: fixCorruptedText(item.target),
+    detail: fixCorruptedText(item.detail),
+  }));
+
   return {
-    logs: payload.logs || [],
+    logs: cleanedLogs,
     total: Number(payload.total || 0),
     page: Number(payload.page || page),
     limit: Number(payload.limit || limit),
@@ -4124,7 +4161,15 @@ export async function fetchAdminLogs() {
       headers: { Authorization: `Bearer ${token}` },
     })
   );
-  return payload.logs || [];
+  const rawLogs = payload.logs || [];
+  return rawLogs.map((item: any) => ({
+    ...item,
+    subject: fixCorruptedText(item.subject),
+    action: fixCorruptedText(item.action),
+    actor: fixCorruptedText(item.actor),
+    target: fixCorruptedText(item.target),
+    detail: fixCorruptedText(item.detail),
+  }));
 }
 
 

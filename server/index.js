@@ -5364,7 +5364,7 @@ async function sendVerificationEmail(toEmail, fullname, code, clientUrl = "https
           <tr>
             <td align="center" style="padding:24px 32px 32px;">
               <p style="margin:0;font-size:13px;line-height:21px;color:#6b7280;">
-                Nếu bạn không yêu cầu mã này, hãy b? qua email này.
+                Nếu bạn không yêu cầu mã này, hãy bỏ qua email này.
               </p>
               <p style="margin:12px 0 0;font-size:13px;color:#4b5563;">
                 © ${appName}. All rights reserved.
@@ -6099,15 +6099,42 @@ function publicSessions(user, currentTokenHash) {
   }));
 }
 
+function fixCorruptedText(text) {
+  if (!text || typeof text !== "string") return text;
+  if (!text.includes("?")) return text;
+  return text
+    .replace(/T\?i kho\?n/g, "Tài khoản")
+    .replace(/Qu\?t tin nh\?n/g, "Quét tin nhắn")
+    .replace(/Qu\?t Tin Nh\?n/g, "Quét Tin Nhắn")
+    .replace(/Qu\?t/g, "Quét")
+    .replace(/tin nh\?n/g, "tin nhắn")
+    .replace(/Tin Nh\?n/g, "Tin Nhắn")
+    .replace(/b\?ng/g, "bằng")
+    .replace(/ho\?c/g, "hoặc")
+    .replace(/b\? qua/g, "bỏ qua")
+    .replace(/s\? kiện/g, "sự kiện")
+    .replace(/ t\? /g, " từ ")
+    .replace(/Kh\?ng t\?m th\?y t\?i kho\?n/g, "Không tìm thấy tài khoản")
+    .replace(/\?\? y\?u c\?u/g, "Đã yêu cầu")
+    .replace(/ri\?ng \?\? b\?t/g, "riêng để bắt")
+    .replace(/t\? g\?i t\?/g, "tự gửi từ")
+    .replace(/kh\?i/g, "khỏi")
+    .replace(/di\?n tho\?i/g, "điện thoại")
+    .replace(/\?ng d\?ng/g, "ứng dụng")
+    .replace(/dang nh\?p/g, "đăng nhập")
+    .replace(/d\? dang nh\?p/g, "để đăng nhập")
+    .replace(/ch\? b\?n/g, "chờ bạn");
+}
+
 function publicActivityLog(row) {
   return {
     id: `#${row.id}`,
     numeric_id: Number(row.id),
-    subject: row.subject,
-    action: row.action,
-    actor: row.actor,
-    target: row.target,
-    detail: row.detail,
+    subject: fixCorruptedText(row.subject),
+    action: fixCorruptedText(row.action),
+    actor: fixCorruptedText(row.actor),
+    target: fixCorruptedText(row.target),
+    detail: fixCorruptedText(row.detail),
     tone: row.tone || "blue",
     ip_address: row.ip_address,
     device_name: row.device_name,
@@ -6138,11 +6165,11 @@ async function logActivity(userId, req, data) {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         userId,
-        data.subject || "Tài khoản",
-        data.action || "Hoạt động tài khoản",
+        fixCorruptedText(data.subject) || "Tài khoản",
+        fixCorruptedText(data.action) || "Hoạt động tài khoản",
         data.actor || req?.user?.fullname || data.actorFallback || "Hệ thống",
-        data.target || "Tài khoản",
-        data.detail || "Tài khoản vừa có hoạt động mới.",
+        fixCorruptedText(data.target) || "Tài khoản",
+        fixCorruptedText(data.detail) || "Tài khoản vừa có hoạt động mới.",
         data.tone || "blue",
         data.ip_address || ipProfile?.ip || null,
         device.device_name,
@@ -13712,7 +13739,7 @@ route(["/api/facebook_webhook/:pageId"], "post", [async (req, res, next) => {
         action: "Nhận webhook Facebook",
         actor: "Facebook",
         target: "Webhook",
-        detail: `Đã nhận ${savedCount} tin nhận/s? kiện t? Fanpage ${page.page_name}.`,
+        detail: `Đã nhận ${savedCount} tin nhắn/sự kiện từ Fanpage ${page.page_name}.`,
         tone: "blue",
       });
     }
@@ -13900,7 +13927,7 @@ route(["/api/facebook_webhook/:pageId"], "post", [async (req, res, next) => {
         action: "Nhận webhook Facebook",
         actor: "Facebook",
         target: "Webhook",
-        detail: `Đã nhận s? kiện webhook t? Fanpage ${rows[0].page_name}.`,
+        detail: `Đã nhận sự kiện webhook từ Fanpage ${rows[0].page_name}.`,
         tone: "blue",
       });
     }
@@ -14655,21 +14682,21 @@ route(["/api/zalo_accounts", "/api/zalo_accounts.php"], "post", [requireUser, as
         subject: "Tài khoản Zalo",
         action: "Đồng bộ Zalo runtime",
         target: "zca-js",
-        detail: `Đã khôi phục ${restored} phiên Zalo t? cookie nội bộ.`,
+        detail: `Đã khôi phục ${restored} phiên Zalo từ cookie nội bộ.`,
         tone: "green",
       });
-      return res.json({ success: true, message: `Đã đồng bộ Zalo. Khôi phục ${restored} phiên t? cookie nội bộ.`, accounts: await localZaloAccounts(req.user.id) });
+      return res.json({ success: true, message: `Đã đồng bộ Zalo. Khôi phục ${restored} phiên từ cookie nội bộ.`, accounts: await localZaloAccounts(req.user.id) });
     }
     if (action === "scan_messages") {
       const accountId = Number(req.body.id || req.body.zalo_account_id || 0);
       const account = (await query("SELECT id FROM zalo_accounts WHERE id = ? AND user_id = ? LIMIT 1", [accountId, req.user.id]))[0];
-      if (!account) return jsonError(res, 404, "Kh?ng t?m th?y t?i kho?n Zalo.");
+      if (!account) return jsonError(res, 404, "Không tìm thấy tài khoản Zalo.");
       await requestZaloOldUserMessages(req.user.id, accountId, "user_manual_scan");
       await logActivity(req.user.id, req, {
-        subject: "T?i kho?n Zalo",
-        action: "Qu?t tin nh?n Zalo",
-        target: `T?i kho?n Zalo #${accountId}`,
-        detail: "?? y?u c?u zca-js qu?t old messages chat ri?ng ?? b?t tin nh?n t? g?i t? app Zalo.",
+        subject: "Tài khoản Zalo",
+        action: "Quét tin nhắn Zalo",
+        target: `Tài khoản Zalo #${accountId}`,
+        detail: "Đã yêu cầu zca-js quét tin nhắn cũ để bắt tin nhắn tự gửi từ app Zalo.",
         tone: "blue",
       });
       return res.json({ success: true, message: "Đã gửi yêu cầu quét tin nhắn Zalo cũ. Chờ vài giây để listener trả dữ liệu.", accounts: await localZaloAccounts(req.user.id) });
@@ -14995,7 +15022,7 @@ route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
         subject: "Chiến dịch Zalo",
         action: "Quét thành viên nhóm Zalo",
         target: groupId,
-        detail: `Đã quét ${members.length} thành viên t? nhóm Zalo ${groupId}.`,
+        detail: `Đã quét ${members.length} thành viên từ nhóm Zalo ${groupId}.`,
         tone: "green",
       });
       return res.json({ success: true, message: `Đã quét ${members.length} thành viên Zalo.`, members: members.map(publicZaloGroupMember) });
@@ -16011,7 +16038,7 @@ route(["/api/tickets"], "post", [requireUser, async (req, res, next) => {
     if (!body) return jsonError(res, 422, "Vui lòng nhập nội dung ticket.");
     if (attachments.length > 5) return jsonError(res, 422, "Tối đa 5 ảnh đính kèm.");
 
-    // Validate attachments: ch? cho phép base64 data URL ?nh
+    // Validate attachments: chỉ cho phép base64 data URL ảnh
     const validTypes = ["image/jpeg", "image/png", "image/gif", "image/webp"];
     for (const att of attachments) {
       const match = String(att || "").match(/^data:(image\/[a-z+]+);base64,/);
@@ -18482,6 +18509,15 @@ route(["/api/admin/tickets/:id/status"], "put", [requireAdmin, async (req, res, 
 
 route(["/api/admin/logs"], "get", [requireAdmin, async (req, res, next) => {
   try {
+    await exec(`
+      UPDATE activity_logs
+      SET
+        subject = REPLACE(REPLACE(subject, 'T?i kho?n', 'Tài khoản'), 'T?i', 'Tài'),
+        action = REPLACE(REPLACE(REPLACE(action, 'Qu?t tin nh?n', 'Quét tin nhắn'), 'Qu?t', 'Quét'), 'tin nh?n', 'tin nhắn'),
+        detail = REPLACE(REPLACE(REPLACE(REPLACE(detail, 'T?i kho?n', 'Tài khoản'), 'Qu?t', 'Quét'), 'tin nh?n', 'tin nhắn'), '??', 'Đã')
+      WHERE subject LIKE '%?%' OR action LIKE '%?%' OR detail LIKE '%?%'
+    `).catch(() => null);
+
     const rows = await query(`
       SELECT l.id, l.subject, l.action, l.actor, l.target, l.detail, l.tone, l.ip_address, l.device_name,
              u.fullname AS user_name, DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
@@ -18491,7 +18527,13 @@ route(["/api/admin/logs"], "get", [requireAdmin, async (req, res, next) => {
     `);
     res.json({
       success: true,
-      logs: rows,
+      logs: rows.map(r => ({
+        ...r,
+        subject: fixCorruptedText(r.subject),
+        action: fixCorruptedText(r.action),
+        target: fixCorruptedText(r.target),
+        detail: fixCorruptedText(r.detail),
+      })),
     });
   } catch (error) {
     next(error);
