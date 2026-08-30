@@ -8628,22 +8628,59 @@ async function saveZaloGroupSenderFromPayload({ userId, accountId, ownId, payloa
 
 async function scanZaloGroupsForAccount(userId, accountId) {
   const { account, row } = await getZaloRuntimeAccountByDbId(userId, accountId);
-  if (!account.api.getAllGroups) throw new Error("Phiên Zalo hiện tại không hỗ trợ quét danh sách nhóm.");
+  if (!account?.api?.getAllGroups) throw new Error("Phiên Zalo hiện tại không hỗ trợ quét danh sách nhóm.");
 
-  const allGroups = await account.api.getAllGroups();
-  const groupIds = Object.keys(allGroups?.gridVerMap || allGroups?.groups || allGroups || {})
-    .map((id) => String(id))
-    .filter(Boolean);
+  const allGroups = await account.api.getAllGroups().catch((error) => {
+    writeLog("[zalo get all groups error]", { userId, accountId, error: error instanceof Error ? error.message : String(error) });
+    return {};
+  });
+
+  const rawMap =
+    allGroups?.gridVerMap ||
+    allGroups?.data?.gridVerMap ||
+    allGroups?.groups ||
+    allGroups?.data?.groups ||
+    (allGroups?.data && typeof allGroups.data === "object" ? allGroups.data : null) ||
+    allGroups ||
+    {};
+
+  const groupIds = Object.keys(rawMap)
+    .map((id) => String(id).replace(/^(?:g_|group_)/i, ""))
+    .filter((id) => /^\d+$/.test(id));
   const uniqueGroupIds = [...new Set(groupIds)];
-  if (!uniqueGroupIds.length) return [];
+
+  if (!uniqueGroupIds.length) {
+    return query(
+      `SELECT id, zalo_account_id, group_id, group_name, member_count, can_send_message, status,
+              DATE_FORMAT(last_scanned_at, '%Y-%m-%d %H:%i:%s') AS last_scanned_at
+       FROM zalo_groups
+       WHERE user_id = ? AND zalo_account_id = ? AND status = 'active'
+       ORDER BY group_name ASC, id ASC`,
+      [userId, accountId]
+    );
+  }
 
   let infoMap = {};
-  if (account.api.getGroupInfo) {
-    try {
-      const infoPayload = await account.api.getGroupInfo(uniqueGroupIds);
-      infoMap = infoPayload?.gridInfoMap || infoPayload?.groups || {};
-    } catch (error) {
-      writeLog("[zalo group info scan error]", { accountId, error: error instanceof Error ? error.message : String(error) });
+  if (account.api.getGroupInfo && uniqueGroupIds.length) {
+    const chunkSize = 30;
+    for (let i = 0; i < uniqueGroupIds.length; i += chunkSize) {
+      const chunk = uniqueGroupIds.slice(i, i + chunkSize);
+      try {
+        const infoPayload = await account.api.getGroupInfo(chunk);
+        const chunkMap =
+          infoPayload?.gridInfoMap ||
+          infoPayload?.data?.gridInfoMap ||
+          infoPayload?.groups ||
+          infoPayload?.data?.groups ||
+          (infoPayload?.data && typeof infoPayload.data === "object" ? infoPayload.data : null) ||
+          infoPayload ||
+          {};
+        if (chunkMap && typeof chunkMap === "object") {
+          infoMap = { ...infoMap, ...chunkMap };
+        }
+      } catch (error) {
+        writeLog("[zalo group info scan chunk error]", { accountId, chunk, error: error instanceof Error ? error.message : String(error) });
+      }
     }
   }
 
@@ -15032,30 +15069,40 @@ route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
     if (action === "scan_groups") {
       const accountId = Number(req.body.zalo_account_id || req.body.account_id || 0);
       if (!accountId) return jsonError(res, 422, "Vui lòng chọn tài khoản Zalo để quét nhóm.");
-      const groups = await scanZaloGroupsForAccount(req.user.id, accountId);
-      await logActivity(req.user.id, req, {
-        subject: "Chiến dịch Zalo",
-        action: "Quét nhóm Zalo",
-        target: "zca-js",
-        detail: `Đã quét ${groups.length} nhóm từ tài khoản Zalo #${accountId}.`,
-        tone: "green",
-      });
-      return res.json({ success: true, message: `Đã quét ${groups.length} nhóm Zalo.`, groups: groups.map(publicZaloGroup) });
+      try {
+        const groups = await scanZaloGroupsForAccount(req.user.id, accountId);
+        await logActivity(req.user.id, req, {
+          subject: "Chiến dịch Zalo",
+          action: "Quét nhóm Zalo",
+          target: "zca-js",
+          detail: `Đã quét ${groups.length} nhóm từ tài khoản Zalo #${accountId}.`,
+          tone: "green",
+        });
+        return res.json({ success: true, message: `Đã quét ${groups.length} nhóm Zalo.`, groups: groups.map(publicZaloGroup) });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return jsonError(res, 400, `Lỗi quét nhóm Zalo: ${msg}`);
+      }
     }
 
     if (action === "scan_members") {
       const accountId = Number(req.body.zalo_account_id || req.body.account_id || 0);
       const groupId = cleanString(req.body.group_id || req.body.source_group_id);
       if (!accountId) return jsonError(res, 422, "Vui lòng chọn tài khoản Zalo để quét thành viên.");
-      const members = await scanZaloGroupMembersForAccount(req.user.id, accountId, groupId);
-      await logActivity(req.user.id, req, {
-        subject: "Chiến dịch Zalo",
-        action: "Quét thành viên nhóm Zalo",
-        target: groupId,
-        detail: `Đã quét ${members.length} thành viên từ nhóm Zalo ${groupId}.`,
-        tone: "green",
-      });
-      return res.json({ success: true, message: `Đã quét ${members.length} thành viên Zalo.`, members: members.map(publicZaloGroupMember) });
+      try {
+        const members = await scanZaloGroupMembersForAccount(req.user.id, accountId, groupId);
+        await logActivity(req.user.id, req, {
+          subject: "Chiến dịch Zalo",
+          action: "Quét thành viên nhóm Zalo",
+          target: groupId,
+          detail: `Đã quét ${members.length} thành viên từ nhóm Zalo ${groupId}.`,
+          tone: "green",
+        });
+        return res.json({ success: true, message: `Đã quét ${members.length} thành viên Zalo.`, members: members.map(publicZaloGroupMember) });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return jsonError(res, 400, `Lỗi quét thành viên Zalo: ${msg}`);
+      }
     }
 
     if (action === "scan_friends") {
