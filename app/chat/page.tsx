@@ -64,14 +64,25 @@ function deduplicateMessages(messages: ChatMessage[]): ChatMessage[] {
   const seenIds = new Set<number>();
   const seenContent = new Set<string>();
   const result: ChatMessage[] = [];
+
+  for (const message of messages) {
+    if (!message || !message.id) continue;
+    if (message.id > 0 && message.text) {
+      const contentKey = `${message.from}:${message.text}:${formatTime(message.time)}`;
+      seenContent.add(contentKey);
+    }
+  }
+
   for (const message of messages) {
     if (!message || !message.id) continue;
     if (seenIds.has(message.id)) continue;
     seenIds.add(message.id);
 
-    const contentKey = `${message.from}:${message.text || ""}:${formatTime(message.time)}`;
-    if (message.text && seenContent.has(contentKey)) continue;
-    if (message.text) seenContent.add(contentKey);
+    if (message.id <= 0 && message.text) {
+      const contentKey = `${message.from}:${message.text}:${formatTime(message.time)}`;
+      if (seenContent.has(contentKey)) continue;
+      seenContent.add(contentKey);
+    }
 
     result.push(message);
   }
@@ -80,14 +91,16 @@ function deduplicateMessages(messages: ChatMessage[]): ChatMessage[] {
 
 function mergeConversationDetail(next: ChatConversation, previous?: ChatConversation) {
   const nextMessages = Array.isArray(next.messages) ? next.messages : [];
-  if (nextMessages.length > 0) {
-    return { ...next, messages: deduplicateMessages(nextMessages) };
+  const previousMessages = Array.isArray(previous?.messages) ? previous.messages : [];
+
+  if (nextMessages.length === 0 && previousMessages.length > 0) {
+    return { ...next, messages: deduplicateMessages(previousMessages) };
   }
-  if (previous?.messages?.length) {
-    const validPrevious = previous.messages.filter((message) => message.id > 0);
-    return { ...next, messages: deduplicateMessages(validPrevious) };
-  }
-  return { ...next, messages: [] };
+
+  const pendingOptimistic = previousMessages.filter((m) => m && m.id <= 0);
+  const combined = [...nextMessages, ...pendingOptimistic];
+
+  return { ...next, messages: deduplicateMessages(combined) };
 }
 
 function mergeConversationLists(next: ChatConversation[], current: ChatConversation[]) {
@@ -143,7 +156,7 @@ function imageAttachments(attachments: ChatAttachment[]) {
 function chatMessagePreviewText(chatMessage?: ChatMessage | null) {
   if (!chatMessage) return "";
   const hasImage = imageAttachments(chatMessage.attachments || []).length > 0;
-  return chatMessage.text || (hasImage ? "[ảnh]" : "");
+  return chatMessage.text || (hasImage ? "[Ảnh]" : "");
 }
 
 function ChatContactDetail({
@@ -401,6 +414,7 @@ export default function ChatPage() {
       setActiveId((current) => current ?? payload.conversation.id);
       // Nếu đây là conversation đang mở → reload ngay để lấy tin nhắn mới từ DB
       if (isActiveConversation) {
+        detailHydrationKeyRef.current = null;
         loadInboxRef.current?.(payload.conversation.id);
       }
     });
@@ -462,24 +476,12 @@ export default function ChatPage() {
   }, [activeConversation?.id, activeConversation?.messages.length, mobileRoomOpen]);
 
   useEffect(() => {
-    if (!activeConversation) return;
-    const latestMessage = activeConversation.messages[activeConversation.messages.length - 1];
-    const latestMessageIsStored = latestMessage && latestMessage.id > 0;
-    const latestMessageMatchesPreview = latestMessage
-      && (latestMessage.time === activeConversation.time || chatMessagePreviewText(latestMessage) === activeConversation.last_message);
-
-    // Đã có đủ tin nhắn khớp preview → không cần load
-    if (activeConversation.messages.length && latestMessageIsStored && latestMessageMatchesPreview) {
-      detailHydrationKeyRef.current = null;
-      return;
-    }
-    if (!activeConversation.last_message) return;
-    // Chỉ dùng id+time+last_message làm key (không dùng messages.length để tránh loop)
-    const hydrationKey = `${activeConversation.id}:${activeConversation.time || ""}:${activeConversation.last_message}`;
-    if (detailHydrationKeyRef.current === hydrationKey) return;
+    if (!activeConversation?.id) return;
+    const hydrationKey = `${activeConversation.id}:${activeConversation.last_message || ""}:${activeConversation.time || ""}`;
+    if (detailHydrationKeyRef.current === hydrationKey && activeConversation.messages.length > 0) return;
     detailHydrationKeyRef.current = hydrationKey;
     loadInbox(activeConversation.id);
-  }, [activeConversation?.id, activeConversation?.last_message, activeConversation?.time, activeConversation?.messages.length]);
+  }, [activeConversation?.id, activeConversation?.last_message, activeConversation?.time]);
 
   useEffect(() => {
     setReplyToMessage(null);
@@ -536,6 +538,7 @@ export default function ChatPage() {
     : sourceFilter === "zalo" ? "Tất cả tài khoản" : sourceFilter === "fanpage" ? "Tất cả Fanpage" : "Website";
 
   async function handleSelectConversation(id: number) {
+    detailHydrationKeyRef.current = null;
     setActiveId(id);
     setMobileRoomOpen(true);
     setMobileDetailOpen(false);
@@ -609,7 +612,7 @@ export default function ChatPage() {
     try {
       const result = await syncZaloMessages(activeConversation.source_ref_id);
       showToast(result.message || "Đã gửi yêu cầu đồng bộ. Tin nhắn sẽ cập nhật sau vài giây...");
-      // Chờ 3 giây rồi reload để listener kịp trả về dữ liệu
+      detailHydrationKeyRef.current = null;
       await new Promise((resolve) => setTimeout(resolve, 3000));
       await loadInbox(activeConversation.id);
     } catch (error) {

@@ -6748,6 +6748,12 @@ async function recordZaloSelfUserMessage(account, message, reason = "self_messag
   const payload = message?.data && typeof message.data === "object"
     ? unwrapZaloPayload({ data: message.data, type: message.type, isSelf: message.isSelf })
     : unwrapZaloPayload(message || {});
+
+  if (isZaloCallEndedBubbleEvent(payload)) {
+    writeLog("[zalo self message ignored call-ended bubble]", { ownId: account.ownId, accountId: account.dbId });
+    return false;
+  }
+
   const payloadSender = firstText(payload.uidFrom, payload.fromId, payload.senderId, payload.userId);
   const isSelf = Boolean(message?.isSelf ?? payload?.isSelf) || payload.uidFrom === "0" || (payloadSender && String(payloadSender) === String(account.ownId));
   if (!isSelf || isZaloGroupPayload(payload)) return false;
@@ -6767,29 +6773,36 @@ async function recordZaloSelfUserMessage(account, message, reason = "self_messag
   ))[0];
   if (!conversation) return false;
 
-  const body = zaloPayloadText(payload) || "";
+  const attachments = zaloImageAttachments(payload);
+  const isImage = isImageMessageType(payload.msgType) || attachments.length > 0;
+  const rawBody = zaloPayloadText(payload) || "";
+  const storedBody = isImage
+    ? (firstText(payload.content?.title, payload.content?.description, rawBody) || "[Ảnh]")
+    : (rawBody || "[Tin nhắn Zalo]");
   const sentAt = nowSql(new Date(sentAtMs));
   const rawMsgId = firstText(payload.msgId, payload.messageId, payload.cliMsgId, payload.id, payload.realMsgId);
   const externalMessageId = rawMsgId || `zalo:self:${conversation.id}:${crypto.randomBytes(12).toString("hex")}`;
-  const storedBody = body || "[Tin nhắn Zalo]";
 
-  // Kiểm tra trùng lặp: nếu tin nhắn này đã được ghi bởi POST /api/chat/:id/reply hoặc event trùng
+  const isGenericText = storedBody === "[Tin nhắn Zalo]" || storedBody === "[Ảnh]" || storedBody === "[Tin nhan Zalo]";
+  const duplicateConditions = [
+    "external_message_id = ?",
+    "external_message_id = ?",
+  ];
+  const queryParams = [
+    externalMessageId,
+    `zalo:self:${conversation.id}:${externalMessageId}`,
+  ];
+  if (!isGenericText && storedBody) {
+    duplicateConditions.push("(sender_type = 'agent' AND body = ? AND sent_at >= NOW() - INTERVAL 30 SECOND)");
+    queryParams.push(storedBody);
+  }
+
   const existingMessage = (await query(
     `SELECT id FROM chat_messages
      WHERE conversation_id = ? AND user_id = ?
-       AND (
-         external_message_id = ?
-         OR external_message_id = ?
-         OR (sender_type = 'agent' AND body = ? AND sent_at >= NOW() - INTERVAL 30 SECOND)
-       )
+       AND (${duplicateConditions.join(" OR ")})
      LIMIT 1`,
-    [
-      conversation.id,
-      account.userId,
-      externalMessageId,
-      `zalo:self:${conversation.id}:${externalMessageId}`,
-      storedBody,
-    ]
+    [conversation.id, account.userId, ...queryParams]
   ))[0];
 
   if (existingMessage) {
@@ -6807,9 +6820,9 @@ async function recordZaloSelfUserMessage(account, message, reason = "self_messag
       externalMessageId,
       String(account.ownId || account.userId),
       account.displayName || "Zalo",
-      payload.msgType || "text",
+      isImage ? "image" : (payload.msgType || "text"),
       storedBody,
-      safeJson([]),
+      safeJson(attachments),
       safeJson({ payload, reason }),
       sentAt,
     ]
@@ -7789,19 +7802,22 @@ function unwrapZaloPayload(payload = {}) {
 }
 
 function isZaloCallEndedBubbleEvent(payload = {}) {
-  const stack = [payload];
-  const seen = new Set();
-  while (stack.length) {
-    const current = stack.pop();
-    if (!current || typeof current !== "object") continue;
-    if (seen.has(current)) continue;
-    seen.add(current);
-    for (const [key, value] of Object.entries(current)) {
-      if (typeof value === "string" && /sendBubbleMessage/i.test(value)) return true;
-      if (value && typeof value === "object") stack.push(value);
-      if (/sendBubbleMessage/i.test(String(key))) return true;
-    }
+  if (!payload || typeof payload !== "object") return false;
+  const msgType = String(payload.msgType || payload.type || "").toLowerCase();
+
+  if (/^(text|photo|image|chat\.photo|sticker|chat\.sticker|share\.file|1|2|5)$/i.test(msgType)) {
+    return false;
   }
+
+  if (/^sendBubbleMessage$/i.test(msgType) || /^call_ended$/i.test(msgType) || /^voice_call$/i.test(msgType) || /^video_call$/i.test(msgType)) {
+    return true;
+  }
+
+  const actionType = String(payload.content?.action || payload.content?.type || payload.action || "").toLowerCase();
+  if (/call_status|voicecall|videocall|voice_call|video_call|sendBubbleMessage/i.test(actionType)) {
+    return true;
+  }
+
   return false;
 }
 
@@ -7833,23 +7849,74 @@ function normalizeImageAttachment(input = {}) {
   };
 }
 
+function pickDeepImageUrl(value) {
+  if (!value || typeof value !== "object") return null;
+  const stack = [value];
+  const seen = new Set();
+  while (stack.length) {
+    const current = stack.pop();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    for (const [key, item] of Object.entries(current)) {
+      if (typeof item === "string" && /^https?:\/\/.+/i.test(item)) {
+        if (/image|photo|jpg|jpeg|png|webp|gif|avatar|zalo/i.test(key) || /\.(jpg|jpeg|png|webp|gif)(\?|#|$)/i.test(item)) {
+          return item;
+        }
+      }
+      if (item && typeof item === "object") stack.push(item);
+    }
+  }
+  return null;
+}
+
 function zaloImageAttachments(payload = {}) {
+  if (!payload || typeof payload !== "object") return [];
   const content = payload.content && typeof payload.content === "object" ? payload.content : {};
-  const params = parseMaybeJson(content.params) || parseMaybeJson(payload.params) || {};
+  const params = parseMaybeJson(content.params) || parseMaybeJson(payload.params) || (typeof content.params === "object" ? content.params : {}) || (typeof payload.params === "object" ? payload.params : {});
   const attachments = [];
+
+  const directUrl = firstText(
+    params.hd, params.hdUrl, params.url, params.href,
+    content.href, content.url, content.thumb, content.hdUrl, content.thumbUrl, content.normalUrl,
+    payload.href, payload.url, payload.hdUrl, payload.thumbUrl, payload.normalUrl,
+    payload.data?.url, payload.data?.href
+  );
+  const directThumb = firstText(
+    content.thumb, content.thumbUrl, content.preview, content.href, content.url,
+    params.thumb, params.thumbUrl, params.hd,
+    payload.thumb, payload.thumbUrl, payload.preview, directUrl
+  );
+
   const direct = normalizeImageAttachment({
     ...content,
-    url: firstText(params.hd, content.href, content.url, content.thumb),
-    thumb: firstText(content.thumb, content.href, params.hd),
-    width: params.width,
-    height: params.height,
+    url: directUrl,
+    thumb: directThumb,
+    width: params.width || content.width || payload.width,
+    height: params.height || content.height || payload.height,
   });
   if (direct) attachments.push(direct);
-  const nested = Array.isArray(payload.attachments) ? payload.attachments : [];
+
+  const nested = Array.isArray(payload.attachments) ? payload.attachments : Array.isArray(content.attachments) ? content.attachments : [];
   for (const item of nested) {
     const normalized = normalizeImageAttachment(item);
     if (normalized) attachments.push(normalized);
   }
+
+  if (attachments.length === 0 && isImageMessageType(payload.msgType)) {
+    const deepUrl = pickDeepImageUrl(payload);
+    if (deepUrl) {
+      attachments.push({
+        type: "image",
+        url: deepUrl,
+        thumb: deepUrl,
+        title: "",
+        description: "",
+        width: null,
+        height: null,
+      });
+    }
+  }
+
   return attachments;
 }
 
@@ -9460,7 +9527,7 @@ async function saveInboundChatEvent(event) {
 
   const sentAt = nowSql(eventDate(event.sentAt));
   const attachments = Array.isArray(event.attachments) ? event.attachments : [];
-  const lastMessage = event.body || (attachments.some((item) => item?.type === "image" || item?.url || item?.thumb) ? "[?nh]" : event.messageType || "Tin nhan moi");
+  const lastMessage = event.body || (attachments.some((item) => item?.type === "image" || item?.url || item?.thumb) ? "[Ảnh]" : event.messageType || "Tin nhắn mới");
   const channelName = event.channelName || (event.source === "fanpage" ? "Fanpage" : event.source === "webchat" ? "Website" : "Zalo");
   const customerName = event.customerName || event.externalUserId || "Khach hang";
   const avatarText = avatarFromName(customerName);
@@ -9800,6 +9867,34 @@ function publicMessages(messageRows) {
   return messageRows.map((row) => publicMessage(row, lookup));
 }
 
+async function fetchRecentConversationMessages(conversationId, userId, limit = 500) {
+  if (!conversationId || !userId) return [];
+  const safeLimit = Math.max(50, Math.min(2000, Number(limit || 500)));
+  const messageRows = await query(
+    `SELECT
+       id,
+       conversation_id,
+       user_id,
+       source,
+       external_message_id,
+       sender_type,
+       sender_id,
+       sender_name,
+       message_type,
+       body,
+       attachments_json,
+       raw_json,
+       DATE_FORMAT(sent_at, '%Y-%m-%d %H:%i:%s') AS sent_at,
+       created_at
+     FROM chat_messages
+     WHERE conversation_id = ? AND user_id = ?
+     ORDER BY sent_at DESC, id DESC
+     LIMIT ${safeLimit}`,
+    [conversationId, userId]
+  );
+  return messageRows.reverse();
+}
+
 function publicChatAttachment(attachment = {}) {
   if (!attachment || typeof attachment !== "object") return attachment;
   return {
@@ -9904,14 +9999,7 @@ async function chatConversationPayload(userId, conversationId) {
   );
   const conversation = rows[0];
   if (!conversation) return null;
-  const messageRows = await query(
-    `SELECT *, DATE_FORMAT(sent_at, '%Y-%m-%d %H:%i:%s') AS sent_at
-     FROM chat_messages
-     WHERE conversation_id = ? AND user_id = ?
-     ORDER BY sent_at ASC, id ASC
-     LIMIT 200`,
-    [conversation.id, userId]
-  );
+  const messageRows = await fetchRecentConversationMessages(conversation.id, userId);
 
   return {
     conversation: publicConversation(conversation, publicMessages(messageRows)),
@@ -9932,14 +10020,7 @@ async function adminChatConversationPayload(conversationId) {
   );
   const conversation = rows[0];
   if (!conversation) return null;
-  const messageRows = await query(
-    `SELECT *, DATE_FORMAT(sent_at, '%Y-%m-%d %H:%i:%s') AS sent_at
-     FROM chat_messages
-     WHERE conversation_id = ? AND user_id = ?
-     ORDER BY sent_at ASC, id ASC
-     LIMIT 200`,
-    [conversation.id, conversation.user_id]
-  );
+  const messageRows = await fetchRecentConversationMessages(conversation.id, conversation.user_id);
 
   return {
     conversation: publicAdminConversation(conversation, publicMessages(messageRows)),
@@ -9961,7 +10042,7 @@ async function createChatMessageNotification({ userId, conversationId, source, c
   if (!userId || !conversationId) return;
   const sourceText = source === "fanpage" ? "Fanpage" : source === "webchat" ? "Website" : "Zalo";
   const title = `Tin nhắn mới từ ${customerName || "khách hàng"}`.slice(0, 190);
-  const body = `${sourceText}${channelName ? ` - ${channelName}` : ""}: ${message || "[?nh]"}`.slice(0, 1000);
+  const body = `${sourceText}${channelName ? ` - ${channelName}` : ""}: ${message || "[Ảnh]"}`.slice(0, 1000);
   await exec(
     "INSERT INTO notifications (user_id, title, message, tone, action_url) VALUES (?, ?, ?, 'blue', ?)",
     [userId, title, body, `/chat?conversation_id=${Number(conversationId)}`]
@@ -9981,7 +10062,7 @@ async function saveAgentChatReply({ conversation, userId, senderId, senderName, 
       height: imageAttachment.height || null,
     }]
     : [];
-  const storedBody = cleanString(message) || (imageAttachment ? "[?nh]" : "");
+  const storedBody = cleanString(message) || (imageAttachment ? "[Ảnh]" : "");
   const messageType = imageAttachment ? "image" : "text";
   await exec(
     `INSERT INTO chat_messages
@@ -10204,7 +10285,7 @@ function quotedPayloadPrompt(raw) {
 
 function quoteTextFromRow(row) {
   const attachments = parseJsonArray(row?.attachments_json);
-  return cleanString(row?.body) || (attachments.length ? "[?nh]" : "");
+  return cleanString(row?.body) || (attachments.length ? "[Ảnh]" : "");
 }
 
 function quoteNameFromRow(row) {
@@ -11210,6 +11291,10 @@ function startZaloListener(account) {
       markZaloRuntimeAccountStatus(account, "online");
       writeLog("[zalo local listener raw]", { ownId, body: msg });
       const payload = unwrapZaloPayload(msg);
+      if (isZaloCallEndedBubbleEvent(payload)) {
+        writeLog("[zalo local listener ignored call-ended bubble]", { ownId, payload });
+        return;
+      }
       const bodyType = zaloBodyType(payload);
       if (payload.isSelf && !isZaloGroupPayload(payload)) {
         recordZaloSelfUserMessage(account, msg, "self_reply_realtime").catch((error) => {
@@ -11309,7 +11394,7 @@ function startZaloListener(account) {
         senderId: customerId,
         senderName: firstText(profile.name, payload.dName, payload.senderName, payload.fromName),
         channelName: account.displayName || `Zalo ${ownId}`,
-        body: isImage ? (firstText(payload.content?.title, payload.content?.description) || "[?nh]") : (zaloPayloadText(payload) || "[Tin nhan Zalo]"),
+        body: isImage ? (firstText(payload.content?.title, payload.content?.description) || "[Ảnh]") : (zaloPayloadText(payload) || "[Tin nhắn Zalo]"),
         messageType: isImage ? "image" : (payload.msgType || "text"),
         attachments,
         sentAt: payload.ts ? Number(payload.ts) : Date.now(),
@@ -13589,7 +13674,7 @@ route(["/api/facebook_webhook/:pageId"], "post", [async (req, res, next) => {
           const externalMessageId = item.message?.mid || item.postback?.mid || item.change?.value?.message_id || item.change?.value?.comment_id;
           const attachments = facebookImageAttachments(item);
           const hasImage = attachments.some((attachment) => attachment?.type === "image" || attachment?.url || attachment?.thumb);
-          const body = firstText(item.message?.text, item.postback?.title, item.change?.value?.message, item.change?.value?.text) || (hasImage ? "[?nh]" : "[Sự kiện Facebook]");
+          const body = firstText(item.message?.text, item.postback?.title, item.change?.value?.message, item.change?.value?.text) || (hasImage ? "[Ảnh]" : "[Sự kiện Facebook]");
           if (!senderId && !externalMessageId) continue;
           const profile = await fetchFacebookCustomerProfile({ access_token: page.access_token }, senderId);
           const saved = await saveInboundChatEvent({
@@ -13760,7 +13845,7 @@ route(["/api/zalo_webhook/:ownId"], "post", [async (req, res, next) => {
       senderId: firstText(payload.uidFrom, payload.fromId, payload.senderId),
       senderName: firstText(payload.dName, payload.senderName, payload.fromName),
       channelName: account.display_name || `Zalo ${account.own_id}`,
-      body: isImage ? (firstText(payload.content?.title, payload.content?.description) || "[?nh]") : (zaloPayloadText(payload) || "[Tin nhan Zalo]"),
+      body: isImage ? (firstText(payload.content?.title, payload.content?.description) || "[Ảnh]") : (zaloPayloadText(payload) || "[Tin nhắn Zalo]"),
       messageType: isImage ? "image" : (firstText(payload.msgType, payload.type) || "text"),
       attachments: attachments.length ? attachments : (payload.attachments || payload.files || []),
       sentAt: payload.ts || payload.timestamp || payload.createdAt || Date.now(),
@@ -13990,7 +14075,7 @@ route(["/api/livechat/message"], "post", [async (req, res, next) => {
       senderId: visitorId,
       senderName: visitorName,
       channelName: widget.name || "Live Chat Website",
-      body: message || (imageAttachment ? "[?nh]" : ""),
+      body: message || (imageAttachment ? "[Ảnh]" : ""),
       messageType: imageAttachment ? "image" : "text",
       attachments: publicAttachments,
       sentAt: Date.now(),
@@ -15335,14 +15420,7 @@ route(["/api/chat"], "get", [requireUser, async (req, res, next) => {
         );
         active.unread_count = 0;
       }
-      const messageRows = await query(
-        `SELECT *, DATE_FORMAT(sent_at, '%Y-%m-%d %H:%i:%s') AS sent_at
-         FROM chat_messages
-         WHERE conversation_id = ? AND user_id = ?
-         ORDER BY sent_at ASC, id ASC
-         LIMIT 200`,
-        [active.id, req.user.id]
-      );
+      const messageRows = await fetchRecentConversationMessages(active.id, req.user.id);
       messages = publicMessages(messageRows);
     }
 
@@ -15385,11 +15463,7 @@ route(["/api/chat/:id"], "patch", [requireUser, async (req, res, next) => {
       req.user.id,
     ]);
 
-    const messageRows = await query(
-      `SELECT *, DATE_FORMAT(sent_at, '%Y-%m-%d %H:%i:%s') AS sent_at
-       FROM chat_messages WHERE conversation_id = ? AND user_id = ? ORDER BY sent_at ASC, id ASC LIMIT 200`,
-      [conversation.id, req.user.id]
-    );
+    const messageRows = await fetchRecentConversationMessages(conversation.id, req.user.id);
     const updated = (await query(
       `SELECT *, DATE_FORMAT(last_message_at, '%Y-%m-%d %H:%i:%s') AS last_message_at,
               DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
@@ -15490,7 +15564,7 @@ route(["/api/chat/:id/reply"], "post", [requireUser, async (req, res, next) => {
         height: imageAttachment.height || null,
       }]
       : [];
-    const storedBody = message || (imageAttachment ? "[?nh]" : "");
+    const storedBody = message || (imageAttachment ? "[Ảnh]" : "");
     const messageType = imageAttachment ? "image" : "text";
     await exec(
       `INSERT INTO chat_messages
@@ -15515,11 +15589,7 @@ route(["/api/chat/:id/reply"], "post", [requireUser, async (req, res, next) => {
       [storedBody, sentAt, conversation.id, req.user.id]
     );
 
-    const messageRows = await query(
-      `SELECT *, DATE_FORMAT(sent_at, '%Y-%m-%d %H:%i:%s') AS sent_at
-       FROM chat_messages WHERE conversation_id = ? AND user_id = ? ORDER BY sent_at ASC, id ASC LIMIT 200`,
-      [conversation.id, req.user.id]
-    );
+    const messageRows = await fetchRecentConversationMessages(conversation.id, req.user.id);
     const updated = (await query(
       `SELECT *, DATE_FORMAT(last_message_at, '%Y-%m-%d %H:%i:%s') AS last_message_at,
               DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
@@ -17821,14 +17891,7 @@ route(["/api/admin/chat"], "get", [requireAdmin, async (req, res, next) => {
         await exec("UPDATE chat_conversations SET unread_count = 0 WHERE id = ?", [active.id]);
         active.unread_count = 0;
       }
-      const messageRows = await query(
-        `SELECT *, DATE_FORMAT(sent_at, '%Y-%m-%d %H:%i:%s') AS sent_at
-         FROM chat_messages
-         WHERE conversation_id = ? AND user_id = ?
-         ORDER BY sent_at ASC, id ASC
-         LIMIT 200`,
-        [active.id, active.user_id]
-      );
+      const messageRows = await fetchRecentConversationMessages(active.id, active.user_id);
       messages = publicMessages(messageRows);
     }
 
@@ -17870,11 +17933,7 @@ route(["/api/admin/chat/:id"], "patch", [requireAdmin, async (req, res, next) =>
       conversation.id,
     ]);
 
-    const messageRows = await query(
-      `SELECT *, DATE_FORMAT(sent_at, '%Y-%m-%d %H:%i:%s') AS sent_at
-       FROM chat_messages WHERE conversation_id = ? AND user_id = ? ORDER BY sent_at ASC, id ASC LIMIT 200`,
-      [conversation.id, conversation.user_id]
-    );
+    const messageRows = await fetchRecentConversationMessages(conversation.id, conversation.user_id);
     const updated = (await query(
       `SELECT c.*, u.id AS owner_id, u.fullname AS owner_fullname, u.email AS owner_email,
               DATE_FORMAT(c.last_message_at, '%Y-%m-%d %H:%i:%s') AS last_message_at,
@@ -17963,11 +18022,7 @@ route(["/api/admin/chat/:id/reply"], "post", [requireAdmin, async (req, res, nex
       raw: storedQuote ? { sendResult, quote: storedQuote, zalo_quote_sent: Boolean(zaloQuote), admin_id: req.user.id } : { sendResult, admin_id: req.user.id },
     });
 
-    const messageRows = await query(
-      `SELECT *, DATE_FORMAT(sent_at, '%Y-%m-%d %H:%i:%s') AS sent_at
-       FROM chat_messages WHERE conversation_id = ? AND user_id = ? ORDER BY sent_at ASC, id ASC LIMIT 200`,
-      [conversation.id, conversation.user_id]
-    );
+    const messageRows = await fetchRecentConversationMessages(conversation.id, conversation.user_id);
     const updated = (await query(
       `SELECT c.*, u.id AS owner_id, u.fullname AS owner_fullname, u.email AS owner_email,
               DATE_FORMAT(c.last_message_at, '%Y-%m-%d %H:%i:%s') AS last_message_at,
