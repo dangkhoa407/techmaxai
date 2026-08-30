@@ -8396,23 +8396,69 @@ function extractZaloGroupMemberCount(info) {
   return 0;
 }
 
+function isZaloGroupAdminOrOwner(info = {}, ownId = "") {
+  const normalizedOwnId = cleanString(ownId);
+  if (!normalizedOwnId) return false;
+
+  const creatorCandidates = [
+    info?.creatorId,
+    info?.ownerId,
+    info?.owner_id,
+    info?.creator_id,
+    info?.setting?.creatorId,
+    info?.setting?.ownerId,
+    info?.data?.creatorId,
+    info?.data?.ownerId,
+    deepFindFirst(info, ["creatorId", "ownerId", "owner_id", "creator_id"]),
+  ].map(cleanString).filter(Boolean);
+
+  if (creatorCandidates.includes(normalizedOwnId)) return true;
+
+  const rawAdminList = [
+    ...(Array.isArray(info?.adminIds) ? info.adminIds : []),
+    ...(Array.isArray(info?.admins) ? info.admins : []),
+    ...(Array.isArray(info?.setting?.adminIds) ? info.setting.adminIds : []),
+    ...(Array.isArray(info?.data?.adminIds) ? info.data.adminIds : []),
+  ];
+
+  const adminIds = rawAdminList.map((item) => {
+    if (typeof item === "object" && item !== null) {
+      return cleanString(firstText(item.id, item.uid, item.userId, item.memberId, item.idTo));
+    }
+    return cleanString(item);
+  }).filter(Boolean);
+
+  if (adminIds.includes(normalizedOwnId)) return true;
+
+  if (info?.isSelfAdmin || info?.isSelfOwner || info?.isAdmin || info?.isOwner || info?.data?.isSelfAdmin || info?.data?.isSelfOwner) {
+    return true;
+  }
+
+  return false;
+}
+
 function extractZaloGroupCanSendMessage(info, ownId) {
+  const hasAdminInfo = Boolean(
+    info?.creatorId || info?.ownerId || info?.owner_id || info?.creator_id ||
+    (Array.isArray(info?.adminIds) && info.adminIds.length > 0) ||
+    (Array.isArray(info?.admins) && info.admins.length > 0)
+  );
+
+  if (hasAdminInfo) {
+    return isZaloGroupAdminOrOwner(info, ownId) ? 1 : 0;
+  }
+
   const lockSendMsg = Number(
     info?.setting?.lockSendMsg ??
     info?.settings?.lockSendMsg ??
     info?.lockSendMsg ??
     deepFindFirst(info, ["lockSendMsg", "lock_send_msg"])
   );
-  if (!Number.isFinite(lockSendMsg) || lockSendMsg !== 1) return true;
+  if (Number.isFinite(lockSendMsg) && lockSendMsg === 1) {
+    return isZaloGroupAdminOrOwner(info, ownId) ? 1 : 0;
+  }
 
-  const normalizedOwnId = cleanString(ownId);
-  if (!normalizedOwnId) return false;
-  const adminIds = [
-    ...(Array.isArray(info?.adminIds) ? info.adminIds : []),
-    ...(Array.isArray(info?.admins) ? info.admins.map((admin) => firstText(admin?.id, admin?.uid, admin?.userId, admin)) : []),
-  ].map((id) => cleanString(id)).filter(Boolean);
-  const ownerId = firstText(info?.creatorId, info?.ownerId, info?.owner_id, info?.creator_id);
-  return adminIds.includes(normalizedOwnId) || cleanString(ownerId) === normalizedOwnId;
+  return isZaloGroupAdminOrOwner(info, ownId) ? 1 : 1;
 }
 
 function extractZaloFriendId(friend) {
@@ -8654,7 +8700,7 @@ async function scanZaloGroupsForAccount(userId, accountId) {
       `SELECT id, zalo_account_id, group_id, group_name, member_count, can_send_message, status,
               DATE_FORMAT(last_scanned_at, '%Y-%m-%d %H:%i:%s') AS last_scanned_at
        FROM zalo_groups
-       WHERE user_id = ? AND zalo_account_id = ? AND status = 'active'
+       WHERE user_id = ? AND zalo_account_id = ? AND status = 'active' AND can_send_message = 1
        ORDER BY group_name ASC, id ASC`,
       [userId, accountId]
     );
@@ -8686,6 +8732,7 @@ async function scanZaloGroupsForAccount(userId, accountId) {
 
   for (const groupId of uniqueGroupIds) {
     const info = infoMap[groupId] || {};
+    const canManage = extractZaloGroupCanSendMessage(info, row?.own_id);
     await exec(
       `INSERT INTO zalo_groups (user_id, zalo_account_id, group_id, group_name, member_count, can_send_message, status, raw_json, last_scanned_at)
        VALUES (?, ?, ?, ?, ?, ?, 'active', ?, NOW())
@@ -8702,7 +8749,7 @@ async function scanZaloGroupsForAccount(userId, accountId) {
         groupId,
         extractZaloGroupName(groupId, info),
         extractZaloGroupMemberCount(info),
-        extractZaloGroupCanSendMessage(info, row?.own_id),
+        canManage,
         safeJson(info),
       ]
     );
@@ -8712,7 +8759,7 @@ async function scanZaloGroupsForAccount(userId, accountId) {
     `SELECT id, zalo_account_id, group_id, group_name, member_count, can_send_message, status,
             DATE_FORMAT(last_scanned_at, '%Y-%m-%d %H:%i:%s') AS last_scanned_at
      FROM zalo_groups
-     WHERE user_id = ? AND zalo_account_id = ? AND status = 'active'
+     WHERE user_id = ? AND zalo_account_id = ? AND status = 'active' AND can_send_message = 1
      ORDER BY group_name ASC, id ASC`,
     [userId, accountId]
   );
