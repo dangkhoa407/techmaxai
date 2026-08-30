@@ -7126,36 +7126,48 @@ function extractZaloDeleteMessageTarget(payload = {}, fallback = {}) {
 async function deleteZaloGroupMessage(userId, accountId, groupId, payload, fallback = {}) {
   const cleanGroupId = cleanString(groupId);
   const target = extractZaloDeleteMessageTarget(payload, fallback);
-  if (!cleanGroupId || !target.msgId || !target.cliMsgId || !target.uidFrom) {
+  const msgId = String(target.msgId || target.cliMsgId || "");
+  const cliMsgId = String(target.cliMsgId || target.msgId || "");
+  if (!cleanGroupId || (!msgId && !cliMsgId)) {
     writeLog("[zalo bot group delete skipped missing target]", { userId, accountId, groupId: cleanGroupId, target });
     return false;
   }
   const { ThreadType } = await import("zca-js");
   const { account } = await getZaloRuntimeAccountByDbId(userId, accountId);
-  const isSelfMessage = Boolean(unwrapZaloPayload(payload || {})?.isSelf) || String(account?.ownId || "") === String(target.uidFrom || "");
-  if (isSelfMessage && account?.api?.undo) {
-    await account.api.undo({
-      msgId: String(target.msgId),
-      cliMsgId: String(target.cliMsgId),
-    }, cleanGroupId, ThreadType.Group);
-    writeLog("[zalo bot group message undone]", { userId, accountId, groupId: cleanGroupId, msgId: target.msgId, uidFrom: target.uidFrom });
-    return true;
+
+  // 1. Thử UNDO (Thu hồi tin nhắn trong nhóm cho tất cả mọi người)
+  if (account?.api?.undo) {
+    try {
+      await account.api.undo({
+        msgId,
+        cliMsgId,
+      }, cleanGroupId, ThreadType.Group);
+      writeLog("[zalo bot group message undone]", { userId, accountId, groupId: cleanGroupId, msgId, cliMsgId, uidFrom: target.uidFrom });
+      return true;
+    } catch (undoError) {
+      writeLog("[zalo bot group undo error, trying deleteMessage]", { userId, accountId, groupId: cleanGroupId, error: undoError instanceof Error ? undoError.message : String(undoError) });
+    }
   }
-  if (!account?.api?.deleteMessage) {
-    writeLog("[zalo bot group delete unsupported]", { userId, accountId, groupId: cleanGroupId, target });
-    return false;
+
+  // 2. Thử deleteMessage (Fallback xóa tin nhắn)
+  if (account?.api?.deleteMessage) {
+    try {
+      await account.api.deleteMessage({
+        threadId: cleanGroupId,
+        type: ThreadType.Group,
+        data: {
+          cliMsgId,
+          msgId,
+          uidFrom: String(target.uidFrom || ""),
+        },
+      }, false);
+      writeLog("[zalo bot group message deleted]", { userId, accountId, groupId: cleanGroupId, msgId, cliMsgId, uidFrom: target.uidFrom });
+      return true;
+    } catch (deleteError) {
+      writeLog("[zalo bot group deleteMessage error]", { userId, accountId, groupId: cleanGroupId, error: deleteError instanceof Error ? deleteError.message : String(deleteError) });
+    }
   }
-  await account.api.deleteMessage({
-    threadId: cleanGroupId,
-    type: ThreadType.Group,
-    data: {
-      cliMsgId: String(target.cliMsgId),
-      msgId: String(target.msgId),
-      uidFrom: String(target.uidFrom),
-    },
-  }, false);
-  writeLog("[zalo bot group message deleted]", { userId, accountId, groupId: cleanGroupId, msgId: target.msgId, uidFrom: target.uidFrom });
-  return true;
+  return false;
 }
 
 function extractGroupEventMembers(event = {}) {
@@ -7228,7 +7240,7 @@ function extractUrlsFromText(text) {
   const scanValues = [...new Set([value, normalizedValue])];
   const matches = scanValues.flatMap((item) => [
     ...(item.match(/(?:https?:\/\/|www\.)[^\s<>"']+/gi) || []),
-    ...(item.match(/\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|vn|site|shop|store|online|io|ai|app|dev|me|info|biz|co|xyz|top|live|link|cloud)(?:\/[^\s<>"']*)?/gi) || []),
+    ...(item.match(/\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:com|net|org|vn|site|shop|store|online|io|ai|app|dev|me|info|biz|co|xyz|top|live|link|cloud|tech|pro|vip|page|cc|ru|group|mobi|asia|us|tk|ga|cf|gq)(?:\/[^\s<>"']*)?/gi) || []),
   ]);
   return [...new Set(matches.map((item) => item.replace(/[),.;!?]+$/g, "")))];
 }
@@ -7327,9 +7339,19 @@ async function sendZaloGroupGuardWarning({
   count,
   blockedUrls = [],
 }) {
-  const enabled = type === "spam" ? settings.antiSpamWarningEnabled : settings.antiLinkWarningEnabled;
-  const template = type === "spam" ? settings.antiSpamWarningText : settings.antiLinkWarningText;
-  if (!enabled || !cleanString(template)) return false;
+  const isSpam = type === "spam";
+  const enabled = isSpam
+    ? (settings.antiSpamEnabled && settings.antiSpamWarningEnabled !== false)
+    : (settings.antiLinkEnabled && settings.antiLinkWarningEnabled !== false);
+  if (!enabled) return false;
+
+  let template = cleanString(isSpam ? settings.antiSpamWarningText : settings.antiLinkWarningText);
+  if (!template) {
+    template = isSpam
+      ? "⚠️ Cảnh báo: @user vui lòng không spam tin nhắn trong nhóm!"
+      : "⚠️ Cảnh báo: @user không được phép gửi link vào nhóm này!";
+  }
+
   const rawPayload = unwrapZaloPayload(event.raw || {});
   const groupContext = await resolveZaloBotGroupContext(userId, accountId, groupId, rawPayload).catch(() => ({
     id: groupId,
@@ -7350,7 +7372,7 @@ async function sendZaloGroupGuardWarning({
     "@group_member_count": groupContext.memberCount || "",
     "@group_owner_id": groupContext.ownerId || "",
     "@group_role": groupContext.role || "",
-    "@violation_type": type === "spam" ? "spam" : "link",
+    "@violation_type": isSpam ? "spam" : "link",
     "@violation_count": String(count || 0),
     "@blocked_url": blockedUrls[0] || "",
     "@blocked_urls": blockedUrls.join(", "),
@@ -7358,7 +7380,7 @@ async function sendZaloGroupGuardWarning({
   const renderedPayload = renderZaloSpecialSendTemplate(
     template,
     values,
-    type === "spam" ? settings.antiSpamWarningTextStyles : settings.antiLinkWarningTextStyles,
+    isSpam ? settings.antiSpamWarningTextStyles : settings.antiLinkWarningTextStyles,
     "group"
   );
   if (!cleanString(renderedPayload.text)) return false;
