@@ -7301,6 +7301,17 @@ async function resolveZaloBotGuardGroupScope(userId, accountId, groupIds = []) {
   ).catch(() => []))[0];
   if (groupScope) return cleanString(groupScope.group_id) || ids[0];
 
+  const totalScope = (await query(
+    `SELECT COUNT(*) AS total
+     FROM zalo_bot_group_scopes
+     WHERE user_id = ? AND zalo_account_id = ? AND enabled = 1`,
+    [userId, accountId]
+  ).catch(() => [{ total: 0 }]))[0];
+  if (Number(totalScope?.total || 0) > 0) {
+    writeLog("[zalo group guard scope skipped group not selected in UI]", { userId, accountId, groupIds, ids });
+    return null;
+  }
+
   const knownGroup = (await query(
     `SELECT group_id
      FROM zalo_groups
@@ -8100,11 +8111,14 @@ function avatarFromName(name, fallback = "KH") {
 }
 
 function isZaloGroupPayload(payload = {}) {
-  const bodyType = zaloBodyType(payload);
-  if (bodyType === 1) return true;
-  const type = String(payload.threadType || payload.msgType || payload.chatType || "").toLowerCase();
+  if (!payload || typeof payload !== "object") return false;
+  if (payload.type === 1 || payload.type === "group" || payload.threadKind === "group") return true;
+  if (payload.data && (payload.data.grid || payload.data.isGroup || payload.data.groupId)) return true;
+  if (payload.grid || payload.groupId || payload.group_id) return true;
+  const typeStr = String(payload.type || payload.threadType || payload.msgType || payload.chatType || "").toLowerCase();
+  if (typeStr.includes("group") || typeStr === "1") return true;
   const threadId = String(payload.threadId || payload.thread_id || payload.toid || payload.groupId || payload.group_id || "");
-  return type.includes("group") || Boolean(payload.groupId || payload.group_id) || /^g(?:roup)?[_:-]/i.test(threadId);
+  return /^g(?:roup)?[_:-]/i.test(threadId);
 }
 
 function eventDate(value) {
