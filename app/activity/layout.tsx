@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { buildMetadata } from "../seo.config";
+import { buildMetadata } from "@/app/seo.config";
 
 export const metadata: Metadata = buildMetadata({
   title: "Nhật ký hoạt động",
