@@ -7132,6 +7132,7 @@ async function deleteZaloGroupMessage(userId, accountId, groupId, payload, fallb
     writeLog("[zalo bot group delete skipped missing target]", { userId, accountId, groupId: cleanGroupId, target });
     return false;
   }
+  const targetGrid = cleanGroupId.replace(/^(?:g_|group_)/i, "") || cleanGroupId;
   const { ThreadType } = await import("zca-js");
   const { account } = await getZaloRuntimeAccountByDbId(userId, accountId);
 
@@ -7141,11 +7142,11 @@ async function deleteZaloGroupMessage(userId, accountId, groupId, payload, fallb
       await account.api.undo({
         msgId,
         cliMsgId,
-      }, cleanGroupId, ThreadType.Group);
-      writeLog("[zalo bot group message undone]", { userId, accountId, groupId: cleanGroupId, msgId, cliMsgId, uidFrom: target.uidFrom });
+      }, targetGrid, ThreadType.Group);
+      writeLog("[zalo bot group message undone]", { userId, accountId, groupId: targetGrid, msgId, cliMsgId, uidFrom: target.uidFrom });
       return true;
     } catch (undoError) {
-      writeLog("[zalo bot group undo error, trying deleteMessage]", { userId, accountId, groupId: cleanGroupId, error: undoError instanceof Error ? undoError.message : String(undoError) });
+      writeLog("[zalo bot group undo error, trying deleteMessage]", { userId, accountId, groupId: targetGrid, error: undoError instanceof Error ? undoError.message : String(undoError) });
     }
   }
 
@@ -7153,7 +7154,7 @@ async function deleteZaloGroupMessage(userId, accountId, groupId, payload, fallb
   if (account?.api?.deleteMessage) {
     try {
       await account.api.deleteMessage({
-        threadId: cleanGroupId,
+        threadId: targetGrid,
         type: ThreadType.Group,
         data: {
           cliMsgId,
@@ -7161,10 +7162,10 @@ async function deleteZaloGroupMessage(userId, accountId, groupId, payload, fallb
           uidFrom: String(target.uidFrom || ""),
         },
       }, false);
-      writeLog("[zalo bot group message deleted]", { userId, accountId, groupId: cleanGroupId, msgId, cliMsgId, uidFrom: target.uidFrom });
+      writeLog("[zalo bot group message deleted]", { userId, accountId, groupId: targetGrid, msgId, cliMsgId, uidFrom: target.uidFrom });
       return true;
     } catch (deleteError) {
-      writeLog("[zalo bot group deleteMessage error]", { userId, accountId, groupId: cleanGroupId, error: deleteError instanceof Error ? deleteError.message : String(deleteError) });
+      writeLog("[zalo bot group deleteMessage error]", { userId, accountId, groupId: targetGrid, error: deleteError instanceof Error ? deleteError.message : String(deleteError) });
     }
   }
   return false;
@@ -7283,7 +7284,12 @@ function isAllowedZaloBotLink(url, allowedText) {
 }
 
 async function resolveZaloBotGuardGroupScope(userId, accountId, groupIds = []) {
-  const ids = [...new Set((Array.isArray(groupIds) ? groupIds : []).map(cleanString).filter(Boolean))];
+  const ids = [...new Set((Array.isArray(groupIds) ? groupIds : []).flatMap((item) => {
+    const clean = cleanString(item);
+    if (!clean) return [];
+    const stripped = clean.replace(/^(?:g_|group_)/i, "");
+    return [clean, stripped, `g_${stripped}`, `group_${stripped}`];
+  }))];
   if (!userId || !accountId || !ids.length) return null;
   const placeholders = ids.map(() => "?").join(",");
   const groupScope = (await query(
@@ -7294,14 +7300,6 @@ async function resolveZaloBotGuardGroupScope(userId, accountId, groupIds = []) {
     [userId, accountId, ...ids]
   ).catch(() => []))[0];
   if (groupScope) return cleanString(groupScope.group_id) || ids[0];
-
-  const totalScope = (await query(
-    `SELECT COUNT(*) AS total
-     FROM zalo_bot_group_scopes
-     WHERE user_id = ? AND zalo_account_id = ? AND enabled = 1`,
-    [userId, accountId]
-  ).catch(() => [{ total: 0 }]))[0];
-  if (Number(totalScope?.total || 0) > 0) return null;
 
   const knownGroup = (await query(
     `SELECT group_id
@@ -7384,6 +7382,7 @@ async function sendZaloGroupGuardWarning({
     "group"
   );
   if (!cleanString(renderedPayload.text)) return false;
+  markRecentAutomatedBotMessage(renderedPayload.text);
   await sendZaloGroupMessage(userId, accountId, groupId, renderedPayload.text, null, renderedPayload.mentions, { styles: renderedPayload.styles, quote: zaloQuoteFromRaw(event.raw) });
   writeLog("[zalo group guard warning sent]", { userId, accountId, groupId, type, count, styleCount: renderedPayload.styles?.length || 0 });
   return true;
@@ -7401,26 +7400,21 @@ function rememberZaloGroupGuardEvent(key) {
   return true;
 }
 
+const recentBotAutomatedMessages = new Set();
+function markRecentAutomatedBotMessage(key) {
+  if (!key) return;
+  const strKey = String(key);
+  recentBotAutomatedMessages.add(strKey);
+  setTimeout(() => recentBotAutomatedMessages.delete(strKey), 30000);
+}
+
 function isZaloBotOwnGroupMessage(event = {}, rawPayload = {}) {
-  const ownId = cleanString(event.ownId);
-  if (!ownId) return false;
-  const payload = rawPayload && typeof rawPayload === "object" ? rawPayload : {};
-  const senderCandidates = [
-    event.senderId,
-    event.externalUserId,
-    event.fromId,
-    payload.uidFrom,
-    payload.fromId,
-    payload.senderId,
-    payload.userId,
-    payload.data?.uidFrom,
-    payload.data?.fromId,
-    payload.data?.senderId,
-    payload.rawEnvelope?.uidFrom,
-    payload.rawEnvelope?.fromId,
-    payload.rawEnvelope?.senderId,
-  ].map(cleanString).filter(Boolean);
-  return Boolean(event.isSelf || payload.isSelf || payload.data?.isSelf || senderCandidates.includes("0") || senderCandidates.includes(ownId));
+  const body = String(event.body || "").trim();
+  if (body.startsWith("⚠️")) return true;
+  const msgId = event.externalMessageId || rawPayload.msgId || rawPayload.cliMsgId;
+  if (msgId && recentBotAutomatedMessages.has(String(msgId))) return true;
+  if (recentBotAutomatedMessages.has(body)) return true;
+  return false;
 }
 
 async function handleZaloBotGroupGuards(event) {
@@ -11387,7 +11381,7 @@ function startZaloListener(account) {
             body: zaloPayloadText(payload) || "",
             raw: msg,
           };
-          if (payload.isSelf) {
+          if (payload.isSelf && isZaloBotOwnGroupMessage(botEvent, payload)) {
             writeLog("[zalo local listener ignored self group command]", {
               ownId,
               bodyType,
