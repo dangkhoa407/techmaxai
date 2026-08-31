@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -66,7 +66,7 @@ type ZaloBotCommand = {
   enabled: boolean;
 };
 
-type SpecialModalType = "away" | "welcome" | "spam" | "link";
+type SpecialModalType = "away" | "welcome" | "spam" | "link" | "autojoin";
 
 function commandStorageKey(accountId: number | string) {
   return `techmax:zalo-bot:commands:v1:${accountId}`;
@@ -161,7 +161,9 @@ const defaultSpecialSettings: ZaloBotSpecialSettings = {
   antiLinkKickAfter: 3,
   antiLinkWarningEnabled: false,
   antiLinkWarningText: "",
-  antiLinkWarningTextStyles: []
+  antiLinkWarningTextStyles: [],
+  autoJoinGroupsEnabled: false,
+  autoLeaveRestrictedGroupsEnabled: false
 };
 
 function createId() {
@@ -1447,16 +1449,30 @@ export default function ZaloBotPage() {
               {
                 checked: specialSettings.antiSpamEnabled,
                 title: "Chống spam tin nhắn group",
-                help: "Xóa tin nhắn spam trong group và có thể tự động kích khỏi nhóm.",
+                help: "Xóa tin nhắn spam trong group và có thể tự động kích khỏi nhóm (Trưởng nhóm & Phó nhóm được miễn trừ).",
                 modal: "spam" as SpecialModalType,
                 onChange: (checked: boolean) => saveSpecialSettingsQuick({ ...specialSettings, antiSpamEnabled: checked }, checked ? "Đã bật chống spam group." : "Đã tắt chống spam group."),
               },
               {
                 checked: specialSettings.antiLinkEnabled,
                 title: "Chống gửi link vô group",
-                help: "Xóa tin nhắn chứa link lạ, whitelist mỗi dòng một link và có thể tự động kích.",
+                help: "Xóa tin nhắn chứa link lạ, whitelist mỗi dòng một link và có thể tự động kích (Trưởng nhóm & Phó nhóm được miễn trừ).",
                 modal: "link" as SpecialModalType,
                 onChange: (checked: boolean) => saveSpecialSettingsQuick({ ...specialSettings, antiLinkEnabled: checked }, checked ? "Đã bật chống gửi link group." : "Đã tắt chống gửi link group."),
+              },
+              {
+                checked: Boolean(specialSettings.autoJoinGroupsEnabled),
+                title: "Tự động tham gia nhóm (Auto Join Group)",
+                help: "Tự động gia nhập nhóm Zalo khi có link group (zalo.me/g/...) gửi trong 1vs1 hoặc trong group.",
+                modal: "autojoin" as SpecialModalType,
+                onChange: (checked: boolean) =>
+                  saveSpecialSettingsQuick(
+                    {
+                      ...specialSettings,
+                      autoJoinGroupsEnabled: checked,
+                    },
+                    checked ? "Đã bật tự động tham gia nhóm." : "Đã tắt tự động tham gia nhóm."
+                  ),
               },
             ].map((item) => (
               <div className="zalo-bot-special-toggle" key={item.title}>
@@ -1470,9 +1486,11 @@ export default function ZaloBotPage() {
                   <strong>{item.title}</strong>
                   <small>{item.help}</small>
                 </span>
-                <button className="btn btn-secondary" type="button" onClick={() => setSpecialModalOpen(item.modal)}>
-                  <Settings2 size={16} /> Setting
-                </button>
+                {item.modal ? (
+                  <button className="btn btn-secondary" type="button" onClick={() => setSpecialModalOpen(item.modal)}>
+                    <Settings2 size={16} /> Setting
+                  </button>
+                ) : null}
               </div>
             ))}
           </div>
@@ -1488,6 +1506,7 @@ export default function ZaloBotPage() {
                     {specialModalOpen === "welcome" ? "Setting chào mừng / tạm biệt group" : null}
                     {specialModalOpen === "spam" ? "Setting chống spam tin nhắn group" : null}
                     {specialModalOpen === "link" ? "Setting chống gửi link vô group" : null}
+                    {specialModalOpen === "autojoin" ? "Setting tự động tham gia nhóm (Auto Join Group)" : null}
                   </h2>
                   <p className="subtitle">{selectedAccount?.display_name || selectedAccount?.own_id || "Tài khoản Zalo"}</p>
                 </div>
@@ -1629,6 +1648,9 @@ export default function ZaloBotPage() {
             {specialModalOpen === "spam" ? (
             <div className="zalo-bot-special-section">
               <h3>Chống spam tin nhắn group</h3>
+              <p className="zalo-bot-field-help" style={{ marginTop: 4, marginBottom: 12, color: "#10b981", display: "flex", alignItems: "center", gap: 6 }}>
+                <span>🛡️ <strong>Lưu ý:</strong> Trưởng nhóm và Phó nhóm luôn được miễn trừ, không bị xóa tin nhắn hoặc kích khỏi nhóm.</span>
+              </p>
               <label className="zalo-bot-request-check">
                 <input checked={specialSettings.antiSpamEnabled} type="checkbox" onChange={(event) => setSpecialSettings((current) => ({ ...current, antiSpamEnabled: event.target.checked }))} />
                 <span>Bật xóa tin nhắn spam trong group</span>
@@ -1674,6 +1696,9 @@ export default function ZaloBotPage() {
             {specialModalOpen === "link" ? (
             <div className="zalo-bot-special-section">
               <h3>Chống gửi link vô group</h3>
+              <p className="zalo-bot-field-help" style={{ marginTop: 4, marginBottom: 12, color: "#10b981", display: "flex", alignItems: "center", gap: 6 }}>
+                <span>🛡️ <strong>Lưu ý:</strong> Trưởng nhóm và Phó nhóm luôn được miễn trừ, được phép gửi link tự do mà không bị chặn hoặc kích.</span>
+              </p>
               <label className="zalo-bot-request-check">
                 <input checked={specialSettings.antiLinkEnabled} type="checkbox" onChange={(event) => setSpecialSettings((current) => ({ ...current, antiLinkEnabled: event.target.checked }))} />
                 <span>Bật xóa tin nhắn chứa link lạ trong group</span>
@@ -1710,6 +1735,23 @@ export default function ZaloBotPage() {
                   </label>
                 ) : null}
               </div>
+            </div>
+            ) : null}
+
+            {specialModalOpen === "autojoin" ? (
+            <div className="zalo-bot-special-section">
+              <h3>Tự động tham gia nhóm (Auto Join Group)</h3>
+              <label className="zalo-bot-request-check">
+                <input
+                  checked={Boolean(specialSettings.autoLeaveRestrictedGroupsEnabled)}
+                  type="checkbox"
+                  onChange={(event) => setSpecialSettings((current) => ({ ...current, autoLeaveRestrictedGroupsEnabled: event.target.checked }))}
+                />
+                <span>Tự động thoát ngay khi mới join nếu nhóm cấm gửi tin nhắn</span>
+              </label>
+              <p className="zalo-bot-field-help" style={{ marginTop: 4, marginLeft: 24, color: "#94a3b8" }}>
+                Chỉ kiểm tra 1 lần lúc vừa join nhóm qua link. Nếu nhóm cho phép nhắn tin thì sẽ ở lại trong nhóm (kể cả sau này nhóm có đổi cài đặt thì bot cũng không tự thoát).
+              </p>
             </div>
             ) : null}
 
