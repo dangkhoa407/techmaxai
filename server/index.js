@@ -1145,6 +1145,8 @@ async function ensureSchema() {
       anti_link_warning_text_styles_json JSON DEFAULT NULL,
       auto_join_groups_enabled TINYINT(1) NOT NULL DEFAULT 0,
       auto_leave_restricted_groups_enabled TINYINT(1) NOT NULL DEFAULT 0,
+      auto_join_delay_seconds INT UNSIGNED NOT NULL DEFAULT 0,
+      auto_leave_delay_seconds INT UNSIGNED NOT NULL DEFAULT 0,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       UNIQUE KEY unique_zalo_bot_special_account (user_id, zalo_account_id),
@@ -1185,6 +1187,8 @@ async function ensureSchema() {
   await addColumnIfMissing("zalo_bot_special_settings", "anti_link_warning_text_styles_json", "anti_link_warning_text_styles_json JSON DEFAULT NULL AFTER anti_link_warning_text");
   await addColumnIfMissing("zalo_bot_special_settings", "auto_join_groups_enabled", "auto_join_groups_enabled TINYINT(1) NOT NULL DEFAULT 0 AFTER anti_link_warning_text_styles_json");
   await addColumnIfMissing("zalo_bot_special_settings", "auto_leave_restricted_groups_enabled", "auto_leave_restricted_groups_enabled TINYINT(1) NOT NULL DEFAULT 0 AFTER auto_join_groups_enabled");
+  await addColumnIfMissing("zalo_bot_special_settings", "auto_join_delay_seconds", "auto_join_delay_seconds INT UNSIGNED NOT NULL DEFAULT 0 AFTER auto_leave_restricted_groups_enabled");
+  await addColumnIfMissing("zalo_bot_special_settings", "auto_leave_delay_seconds", "auto_leave_delay_seconds INT UNSIGNED NOT NULL DEFAULT 0 AFTER auto_join_delay_seconds");
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS zalo_bot_special_reply_logs (
@@ -6614,6 +6618,8 @@ function normalizeZaloBotSpecialSettings(row = {}) {
     antiLinkWarningTextStyles: normalizeZaloTextStyles(row.anti_link_warning_text_styles_json ?? row.antiLinkWarningTextStyles),
     autoJoinGroupsEnabled: Boolean(Number(row.auto_join_groups_enabled || row.autoJoinGroupsEnabled || 0)),
     autoLeaveRestrictedGroupsEnabled: Boolean(Number(row.auto_leave_restricted_groups_enabled || row.autoLeaveRestrictedGroupsEnabled || 0)),
+    autoJoinDelaySeconds: Math.max(0, Math.min(86400, Number(row.auto_join_delay_seconds ?? row.autoJoinDelaySeconds ?? 0) || 0)),
+    autoLeaveDelaySeconds: Math.max(0, Math.min(86400, Number(row.auto_leave_delay_seconds ?? row.autoLeaveDelaySeconds ?? row.autoOutgroupDelaySeconds ?? 0) || 0)),
   };
 }
 
@@ -6626,7 +6632,8 @@ async function loadZaloBotSpecialSettings(userId, accountId) {
             anti_spam_warning_enabled, anti_spam_warning_text, anti_spam_warning_text_styles_json,
             anti_link_enabled, anti_link_allowed_text, anti_link_kick_enabled, anti_link_kick_after,
             anti_link_warning_enabled, anti_link_warning_text, anti_link_warning_text_styles_json,
-            auto_join_groups_enabled, auto_leave_restricted_groups_enabled
+            auto_join_groups_enabled, auto_leave_restricted_groups_enabled,
+            auto_join_delay_seconds, auto_leave_delay_seconds
      FROM zalo_bot_special_settings
      WHERE user_id = ? AND zalo_account_id = ? LIMIT 1`,
     [userId, accountId]
@@ -6640,7 +6647,8 @@ async function loadZaloBotSpecialSettings(userId, accountId) {
               anti_spam_warning_enabled, anti_spam_warning_text, anti_spam_warning_text_styles_json,
               anti_link_enabled, anti_link_allowed_text, anti_link_kick_enabled, anti_link_kick_after,
               anti_link_warning_enabled, anti_link_warning_text, anti_link_warning_text_styles_json,
-              auto_join_groups_enabled, auto_leave_restricted_groups_enabled
+              auto_join_groups_enabled, auto_leave_restricted_groups_enabled,
+              auto_join_delay_seconds, auto_leave_delay_seconds
        FROM zalo_bot_special_settings
        WHERE user_id = ?
          AND (anti_link_enabled = 1 OR anti_spam_enabled = 1 OR away_enabled = 1 OR welcome_enabled = 1 OR goodbye_enabled = 1 OR auto_join_groups_enabled = 1 OR auto_leave_restricted_groups_enabled = 1)
@@ -7453,6 +7461,143 @@ function isZaloBotOwnGroupMessage(event = {}, rawPayload = {}) {
   return false;
 }
 
+const zaloGroupActionQueues = new Map();
+
+function enqueueZaloGroupAction(userId, accountId, task) {
+  const queueKey = `${userId}:${accountId}`;
+  let q = zaloGroupActionQueues.get(queueKey);
+  if (!q) {
+    q = { running: false, items: [] };
+    zaloGroupActionQueues.set(queueKey, q);
+  }
+
+  if (task.type === "join") {
+    const isDuplicate = q.items.some((item) => item.type === "join" && item.link === task.link);
+    if (isDuplicate) {
+      writeLog("[zalo group queue] link already pending in queue, skipping duplicate", { userId, accountId, link: task.link });
+      return;
+    }
+  }
+
+  if (task.type === "leave") {
+    const isDuplicate = q.items.some((item) => item.type === "leave" && item.groupId === task.groupId);
+    if (isDuplicate) {
+      writeLog("[zalo group queue] leave already pending in queue, skipping duplicate", { userId, accountId, groupId: task.groupId });
+      return;
+    }
+  }
+
+  if (task.priority === "high") {
+    q.items.unshift(task);
+  } else {
+    q.items.push(task);
+  }
+  writeLog("[zalo group queue] task enqueued", { userId, accountId, type: task.type, target: task.link || task.groupId, queueLength: q.items.length });
+
+  if (!q.running) {
+    processZaloGroupActionQueue(userId, accountId).catch((err) => {
+      writeLog("[zalo group queue] worker uncaught error", { userId, accountId, error: err instanceof Error ? err.message : String(err) });
+    });
+  }
+}
+
+async function processZaloGroupActionQueue(userId, accountId) {
+  const queueKey = `${userId}:${accountId}`;
+  const q = zaloGroupActionQueues.get(queueKey);
+  if (!q || q.running) return;
+
+  q.running = true;
+
+  try {
+    while (q.items.length > 0) {
+      const task = q.items.shift();
+      if (!task) continue;
+
+      const settings = await loadZaloBotSpecialSettings(userId, accountId);
+      const { account, row } = await getZaloRuntimeAccountByDbId(userId, accountId).catch(() => ({}));
+      if (!account?.api) {
+        writeLog("[zalo group queue] account api not available, dropping task", { userId, accountId, type: task.type });
+        continue;
+      }
+
+      if (task.type === "join") {
+        if (!settings.autoJoinGroupsEnabled) {
+          writeLog("[zalo group queue] auto join disabled, skipping task", { userId, accountId, link: task.link });
+          continue;
+        }
+
+        const delaySeconds = Math.max(0, Number(settings.autoJoinDelaySeconds || 0));
+        if (delaySeconds > 0) {
+          writeLog("[zalo group queue] waiting delay before join group", { userId, accountId, link: task.link, delaySeconds, queueRemaining: q.items.length });
+          await sleep(delaySeconds * 1000);
+        }
+
+        try {
+          writeLog("[zalo bot auto joining group]", { userId, accountId, link: task.link });
+          const joinRes = await account.api.joinGroupLink(task.link);
+          writeLog("[zalo bot auto join group success]", { userId, accountId, link: task.link, result: joinRes });
+
+          const joinedGroupId = cleanString(firstText(
+            joinRes?.groupId,
+            joinRes?.data?.groupId,
+            joinRes?.grid,
+            joinRes?.data?.grid,
+            joinRes?.group_id,
+            deepFindFirst(joinRes, ["groupId", "group_id", "grid"])
+          ));
+
+          if (joinedGroupId && settings.autoLeaveRestrictedGroupsEnabled && typeof account.api.leaveGroup === "function") {
+            try {
+              if (typeof account.api.getGroupInfo === "function") {
+                const infoPayload = await account.api.getGroupInfo(joinedGroupId).catch(() => null);
+                if (infoPayload) {
+                  const info = infoPayload?.gridInfoMap?.[joinedGroupId] || infoPayload?.groups?.[joinedGroupId] || infoPayload?.[joinedGroupId] || infoPayload;
+                  const canSend = extractZaloGroupCanSendMessage(info, row?.own_id || account?.ownId);
+                  if (canSend === 0) {
+                    writeLog("[zalo group queue] restricted group detected, enqueuing outgroup task", { userId, accountId, groupId: joinedGroupId });
+                    enqueueZaloGroupAction(userId, accountId, {
+                      type: "leave",
+                      userId,
+                      accountId,
+                      groupId: joinedGroupId,
+                      priority: "high",
+                    });
+                  }
+                }
+              }
+            } catch (checkErr) {
+              writeLog("[zalo bot check restricted group error]", { userId, accountId, groupId: joinedGroupId, error: checkErr instanceof Error ? checkErr.message : String(checkErr) });
+            }
+          }
+        } catch (joinErr) {
+          writeLog("[zalo bot auto join group error]", { userId, accountId, link: task.link, error: joinErr instanceof Error ? joinErr.message : String(joinErr) });
+        }
+      } else if (task.type === "leave") {
+        const delaySeconds = Math.max(0, Number(settings.autoLeaveDelaySeconds || 0));
+        if (delaySeconds > 0) {
+          writeLog("[zalo group queue] waiting delay before outgroup", { userId, accountId, groupId: task.groupId, delaySeconds, queueRemaining: q.items.length });
+          await sleep(delaySeconds * 1000);
+        }
+
+        try {
+          if (typeof account.api.leaveGroup === "function") {
+            await account.api.leaveGroup(task.groupId, false);
+            await exec("UPDATE zalo_groups SET status = 'inactive', can_send_message = 0 WHERE user_id = ? AND zalo_account_id = ? AND group_id = ?", [userId, accountId, task.groupId]).catch(() => {});
+            writeLog("[zalo bot auto leave restricted group after join]", { userId, accountId, groupId: task.groupId });
+          }
+        } catch (leaveErr) {
+          writeLog("[zalo bot auto leave error after join]", { userId, accountId, groupId: task.groupId, error: leaveErr instanceof Error ? leaveErr.message : String(leaveErr) });
+        }
+      }
+    }
+  } finally {
+    q.running = false;
+    if (q.items.length > 0) {
+      processZaloGroupActionQueue(userId, accountId).catch(() => {});
+    }
+  }
+}
+
 async function handleZaloAutoGroupLinkAndPermissions(event) {
   if (event.source !== "zalo" || !event.sourceRefId) return false;
   const userId = Number(event.userId || 0);
@@ -7463,7 +7608,7 @@ async function handleZaloAutoGroupLinkAndPermissions(event) {
   if (!settings.autoJoinGroupsEnabled) return false;
 
   const rawPayload = unwrapZaloPayload(event.raw || {});
-  const { account, row } = await getZaloRuntimeAccountByDbId(userId, accountId).catch(() => ({}));
+  const { account } = await getZaloRuntimeAccountByDbId(userId, accountId).catch(() => ({}));
   if (!account?.api) return false;
 
   let handled = false;
@@ -7480,40 +7625,13 @@ async function handleZaloAutoGroupLinkAndPermissions(event) {
       const uniqueLinks = [...new Set(matches.map((l) => l.trim()))];
       for (const link of uniqueLinks) {
         const fullLink = /^https?:\/\//i.test(link) ? link : `https://${link}`;
-        try {
-          writeLog("[zalo bot auto joining group]", { userId, accountId, link: fullLink });
-          const joinRes = await account.api.joinGroupLink(fullLink);
-          handled = true;
-          writeLog("[zalo bot auto join group success]", { userId, accountId, link: fullLink, result: joinRes });
-
-          const joinedGroupId = cleanString(firstText(
-            joinRes?.groupId,
-            joinRes?.data?.groupId,
-            joinRes?.grid,
-            joinRes?.data?.grid,
-            joinRes?.group_id,
-            deepFindFirst(joinRes, ["groupId", "group_id", "grid"])
-          ));
-
-          if (joinedGroupId && settings.autoLeaveRestrictedGroupsEnabled && typeof account.api.leaveGroup === "function" && typeof account.api.getGroupInfo === "function") {
-            try {
-              const infoPayload = await account.api.getGroupInfo(joinedGroupId).catch(() => null);
-              if (infoPayload) {
-                const info = infoPayload?.gridInfoMap?.[joinedGroupId] || infoPayload?.groups?.[joinedGroupId] || infoPayload?.[joinedGroupId] || infoPayload;
-                const canSend = extractZaloGroupCanSendMessage(info, row?.own_id || account?.ownId);
-                if (canSend === 0) {
-                  await account.api.leaveGroup(joinedGroupId, false);
-                  await exec("UPDATE zalo_groups SET status = 'inactive', can_send_message = 0 WHERE user_id = ? AND zalo_account_id = ? AND group_id = ?", [userId, accountId, joinedGroupId]).catch(() => {});
-                  writeLog("[zalo bot auto leave restricted group after join]", { userId, accountId, groupId: joinedGroupId });
-                }
-              }
-            } catch (leaveErr) {
-              writeLog("[zalo bot auto leave error after join]", { userId, accountId, groupId: joinedGroupId, error: leaveErr instanceof Error ? leaveErr.message : String(leaveErr) });
-            }
-          }
-        } catch (joinErr) {
-          writeLog("[zalo bot auto join group error]", { userId, accountId, link: fullLink, error: joinErr instanceof Error ? joinErr.message : String(joinErr) });
-        }
+        enqueueZaloGroupAction(userId, accountId, {
+          type: "join",
+          userId,
+          accountId,
+          link: fullLink,
+        });
+        handled = true;
       }
     }
   }
@@ -14631,8 +14749,9 @@ route(["/api/zalo_bot_special_settings"], "put", [requireUser, async (req, res, 
          anti_spam_warning_enabled, anti_spam_warning_text, anti_spam_warning_text_styles_json,
          anti_link_enabled, anti_link_allowed_text, anti_link_kick_enabled, anti_link_kick_after,
          anti_link_warning_enabled, anti_link_warning_text, anti_link_warning_text_styles_json,
-          auto_join_groups_enabled, auto_leave_restricted_groups_enabled)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          auto_join_groups_enabled, auto_leave_restricted_groups_enabled,
+          auto_join_delay_seconds, auto_leave_delay_seconds)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
          away_enabled = VALUES(away_enabled),
          away_text = VALUES(away_text),
@@ -14670,6 +14789,8 @@ route(["/api/zalo_bot_special_settings"], "put", [requireUser, async (req, res, 
          anti_link_warning_text_styles_json = VALUES(anti_link_warning_text_styles_json),
           auto_join_groups_enabled = VALUES(auto_join_groups_enabled),
           auto_leave_restricted_groups_enabled = VALUES(auto_leave_restricted_groups_enabled),
+          auto_join_delay_seconds = VALUES(auto_join_delay_seconds),
+          auto_leave_delay_seconds = VALUES(auto_leave_delay_seconds),
          updated_at = CURRENT_TIMESTAMP`,
       [
         req.user.id,
@@ -14710,6 +14831,8 @@ route(["/api/zalo_bot_special_settings"], "put", [requireUser, async (req, res, 
         safeJson(settings.antiLinkWarningTextStyles || []),
          settings.autoJoinGroupsEnabled ? 1 : 0,
          settings.autoLeaveRestrictedGroupsEnabled ? 1 : 0,
+         settings.autoJoinDelaySeconds || 0,
+         settings.autoLeaveDelaySeconds || 0,
       ]
     );
     res.json({ success: true, message: "ÄÃ£ lÆ°u lệnh đặc biệt BOT Zalo.", settings: await loadZaloBotSpecialSettings(req.user.id, accountId) });

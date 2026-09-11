@@ -126,6 +126,8 @@ export type ZaloBotSpecialSettings = {
   antiLinkWarningTextStyles?: ZaloBotTextStyleRange[];
   autoJoinGroupsEnabled?: boolean;
   autoLeaveRestrictedGroupsEnabled?: boolean;
+  autoJoinDelaySeconds?: number;
+  autoLeaveDelaySeconds?: number;
 };
 
 export type UserProxy = {
@@ -2653,6 +2655,8 @@ export async function fetchZaloBotSpecialSettings(accountId: number | string): P
     antiLinkKickAfter: 3,
     autoJoinGroupsEnabled: false,
     autoLeaveRestrictedGroupsEnabled: false,
+    autoJoinDelaySeconds: 0,
+    autoLeaveDelaySeconds: 0,
   }) as ZaloBotSpecialSettings;
 }
 

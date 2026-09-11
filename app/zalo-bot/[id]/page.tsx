@@ -163,7 +163,9 @@ const defaultSpecialSettings: ZaloBotSpecialSettings = {
   antiLinkWarningText: "",
   antiLinkWarningTextStyles: [],
   autoJoinGroupsEnabled: false,
-  autoLeaveRestrictedGroupsEnabled: false
+  autoLeaveRestrictedGroupsEnabled: false,
+  autoJoinDelaySeconds: 0,
+  autoLeaveDelaySeconds: 0,
 };
 
 function createId() {
@@ -1752,6 +1754,34 @@ export default function ZaloBotPage() {
               <p className="zalo-bot-field-help" style={{ marginTop: 4, marginLeft: 24, color: "#94a3b8" }}>
                 Chỉ kiểm tra 1 lần lúc vừa join nhóm qua link. Nếu nhóm cho phép nhắn tin thì sẽ ở lại trong nhóm (kể cả sau này nhóm có đổi cài đặt thì bot cũng không tự thoát).
               </p>
+
+              <div className="zalo-bot-special-grid">
+                <label className="zalo-bot-field">
+                  <span>Thời gian delay join group (giây)</span>
+                  <input
+                    className="input"
+                    min={0}
+                    type="number"
+                    placeholder="0"
+                    value={specialSettings.autoJoinDelaySeconds ?? 0}
+                    onChange={(event) => setSpecialSettings((current) => ({ ...current, autoJoinDelaySeconds: Math.max(0, parseInt(event.target.value, 10) || 0) }))}
+                  />
+                  <small className="zalo-bot-field-help">Thời gian trễ (giây) khi tới lượt tham gia nhóm. Khi dính time delay sẽ vào hàng đợi xử lý lần lượt.</small>
+                </label>
+
+                <label className="zalo-bot-field">
+                  <span>Thời gian delay outgroup (giây)</span>
+                  <input
+                    className="input"
+                    min={0}
+                    type="number"
+                    placeholder="0"
+                    value={specialSettings.autoLeaveDelaySeconds ?? 0}
+                    onChange={(event) => setSpecialSettings((current) => ({ ...current, autoLeaveDelaySeconds: Math.max(0, parseInt(event.target.value, 10) || 0) }))}
+                  />
+                  <small className="zalo-bot-field-help">Thời gian trễ (giây) khi tới lượt rời nhóm. Khi dính time delay sẽ vào hàng đợi xử lý lần lượt.</small>
+                </label>
+              </div>
             </div>
             ) : null}
 
