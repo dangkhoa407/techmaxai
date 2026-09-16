@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
@@ -20,6 +20,7 @@ import { showConfirm, showToast, showError } from "../lib/swal";
 const emptyBotForm = {
   full_name: "",
   gender: "male",
+  temperature: 0.3,
   model_id: "",
   personality_description: "",
   extra_description: "",
@@ -293,6 +294,7 @@ export default function ChatbotAiPage() {
       const payload = {
         full_name: botForm.full_name,
         gender: botForm.gender,
+        temperature: Number(botForm.temperature ?? 0.3),
         model_id: Number(safeModel.id),
         personality_description: botForm.personality_description,
         extra_description: botForm.extra_description,
@@ -317,6 +319,7 @@ export default function ChatbotAiPage() {
     setBotForm({
       full_name: bot.full_name,
       gender: bot.gender,
+      temperature: bot.temperature !== undefined && bot.temperature !== null ? Number(bot.temperature) : 0.3,
       model_id: bot.model?.id ? String(bot.model.id) : "",
       personality_description: bot.personality_description,
       extra_description: bot.extra_description,
@@ -554,6 +557,56 @@ export default function ChatbotAiPage() {
               </label>
             </div>
 
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "14px 16px", background: "var(--surface-subtle, rgba(255,255,255,0.03))", borderRadius: 10, border: "1px solid var(--border)" }}>
+              <div className="between" style={{ alignItems: "center" }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontWeight: 600, fontSize: 14 }}>Nhiệt độ sáng tạo (Temperature)</span>
+                    <span className={`status ${botForm.temperature <= 0.3 ? "green" : botForm.temperature <= 0.7 ? "blue" : "orange"}`} style={{ fontSize: 11, padding: "2px 8px" }}>
+                      {botForm.temperature <= 0.3 ? "Bám sát dữ liệu" : botForm.temperature <= 0.7 ? "Cân bằng" : "Sáng tạo cao"}
+                    </span>
+                  </div>
+                  <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                    {botForm.temperature <= 0.3
+                      ? "🎯 0.0 - 0.3: Trả lời chuẩn xác 100% bảng giá & quy định (Khuyên dùng bán hàng)"
+                      : botForm.temperature <= 0.7
+                      ? "⚖️ 0.4 - 0.7: Tư vấn tự nhiên, câu cú linh hoạt"
+                      : "🎨 0.8 - 1.0: Sáng tạo cao, phong phú cách diễn đạt"}
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <input
+                    type="number"
+                    min="0"
+                    max="1.5"
+                    step="0.05"
+                    value={botForm.temperature}
+                    onChange={(event) => {
+                      const val = parseFloat(event.target.value);
+                      updateBotField("temperature", isNaN(val) ? 0.3 : Math.min(2, Math.max(0, val)));
+                    }}
+                    className="input"
+                    style={{ width: 70, textAlign: "center", padding: "4px 6px", height: 34, fontWeight: 700 }}
+                  />
+                </div>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={botForm.temperature}
+                onChange={(event) => updateBotField("temperature", parseFloat(event.target.value))}
+                style={{ width: "100%", cursor: "pointer", accentColor: "var(--primary)" }}
+              />
+              <div className="between muted" style={{ fontSize: 11, paddingInline: 2 }}>
+                <span style={{ cursor: "pointer", textDecoration: botForm.temperature === 0.1 ? "underline" : "none" }} onClick={() => updateBotField("temperature", 0.1)}>0.1 (Chính xác nhất)</span>
+                <span style={{ cursor: "pointer", fontWeight: botForm.temperature === 0.3 ? 700 : 400, color: botForm.temperature === 0.3 ? "var(--primary)" : "inherit" }} onClick={() => updateBotField("temperature", 0.3)}>0.3 (Mặc định bán hàng)</span>
+                <span style={{ cursor: "pointer" }} onClick={() => updateBotField("temperature", 0.7)}>0.7 (Tự nhiên)</span>
+                <span style={{ cursor: "pointer" }} onClick={() => updateBotField("temperature", 1.0)}>1.0 (Sáng tạo)</span>
+              </div>
+            </div>
+
             <label>
               <span className="muted" style={{ display: "block", marginBottom: 8 }}>Mô tả tính cách</span>
               <textarea className="input" rows={5} value={botForm.personality_description} onChange={(event) => updateBotField("personality_description", event.target.value)} placeholder="Ví dụ: thân thiện, trả lời ngắn gọn, luôn hỏi thêm nhu cầu khách hàng." />
@@ -694,6 +747,7 @@ export default function ChatbotAiPage() {
                       <th>Bot</th>
                       <th>Giới tính</th>
                       <th>Model</th>
+                      <th>Temp</th>
                       <th>Tính cách</th>
                       <th>Đào tạo</th>
                       <th>Trạng thái</th>
@@ -707,6 +761,11 @@ export default function ChatbotAiPage() {
                         <td><strong>{bot.full_name}</strong></td>
                         <td>{genderLabel(bot.gender)}</td>
                         <td className="bot-list-model"><div className="bot-list-cell-text">{bot.model ? `${bot.model.provider || "AI"} - ${bot.model.name}` : "-"}</div></td>
+                        <td>
+                          <span className={`status ${(bot.temperature ?? 0.3) <= 0.3 ? "green" : (bot.temperature ?? 0.3) <= 0.7 ? "blue" : "orange"}`} title={`Nhiệt độ: ${bot.temperature ?? 0.3}`}>
+                            {bot.temperature !== undefined && bot.temperature !== null ? Number(bot.temperature).toFixed(2) : "0.30"}
+                          </span>
+                        </td>
                         <td className="bot-list-personality"><div className="bot-list-cell-text">{bot.personality_description}</div></td>
                         <td>{bot.training_count || 0} nội dung</td>
                         <td><span className={`status ${bot.status === "active" ? "green" : "orange"}`}>{bot.status === "active" ? "Đang bật" : "Tạm dừng"}</span></td>

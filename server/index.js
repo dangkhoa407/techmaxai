@@ -977,6 +977,7 @@ async function ensureSchema() {
     if (!String(error.message).includes("Duplicate")) throw error;
   });
   await addColumnIfMissing("ai_bots", "gender", "gender VARCHAR(30) NOT NULL DEFAULT 'other' AFTER full_name");
+  await addColumnIfMissing("ai_bots", "temperature", "temperature DECIMAL(3,2) NOT NULL DEFAULT 0.3 AFTER gender");
   await addColumnIfMissing("ai_bots", "personality_description", "personality_description TEXT DEFAULT NULL AFTER model_id");
   await addColumnIfMissing("ai_bots", "extra_description", "extra_description TEXT DEFAULT NULL AFTER personality_description");
   await addColumnIfMissing("ai_bots", "introduction_prompt", "introduction_prompt LONGTEXT DEFAULT NULL AFTER extra_description");
@@ -3581,6 +3582,7 @@ function publicAiBot(row) {
     id: Number(row.id),
     full_name: row.full_name,
     gender: row.gender,
+    temperature: row.temperature !== undefined && row.temperature !== null ? Number(row.temperature) : 0.3,
     personality_description: row.personality_description || "",
     extra_description: row.extra_description || "",
     introduction_prompt: row.introduction_prompt || DEFAULT_BOT_INTRODUCTION_PROMPT,
@@ -4096,7 +4098,7 @@ function trainingCategoryText(category) {
   }[category] || category;
 }
 
-function truncateTrainingText(value, limit = 1800) {
+function truncateTrainingText(value, limit = 6000) {
   const text = cleanString(value) || "";
   return text.length > limit ? `${text.slice(0, limit)}...` : text;
 }
@@ -4674,7 +4676,7 @@ async function resolveAiResultWithApi(aiMessages, model, provider, firstResult, 
   }
   const apiResult = await executeAiBotApiRequest(firstResult.request);
   const followupMessages = buildApiResultFollowupMessages(aiMessages, firstResult, apiResult);
-  const finalResult = normalizeAiResultShape(await callAiChatWithRotation({ provider, req, messages: followupMessages, model, options: { signal: options.signal, documents: options.documents } }));
+  const finalResult = normalizeAiResultShape(await callAiChatWithRotation({ provider, req, messages: followupMessages, model, options: { signal: options.signal, documents: options.documents, temperature: options.temperature } }));
   if (finalResult.action === "call_api") {
     finalResult.action = "reply";
     finalResult.request = null;
@@ -4683,13 +4685,14 @@ async function resolveAiResultWithApi(aiMessages, model, provider, firstResult, 
   return { result: finalResult, apiResult, initialResult: firstResult };
 }
 
-async function resolveAiResultWithBusinessTools({ aiMessages, model, provider, firstResult, req = null, signal = null, documents = [] }) {
-  const apiResolved = await resolveAiResultWithApi(aiMessages, model, provider, firstResult, req, { signal, documents });
+async function resolveAiResultWithBusinessTools({ aiMessages, model, provider, firstResult, req = null, signal = null, documents = [], temperature = undefined }) {
+  const apiResolved = await resolveAiResultWithApi(aiMessages, model, provider, firstResult, req, { signal, documents, temperature });
   return { ...apiResolved, businessResult: null };
 }
 
-async function resolveAiResultForBotTest({ aiMessages, model, provider, firstResult, req = null, bot, documents = [] }) {
-  const apiResolved = await resolveAiResultWithApi(aiMessages, model, provider, firstResult, req, { documents });
+async function resolveAiResultForBotTest({ aiMessages, model, provider, firstResult, req = null, bot, documents = [], temperature = undefined }) {
+  const resolvedTemperature = temperature !== undefined ? temperature : (bot?.temperature !== undefined && bot?.temperature !== null ? Number(bot.temperature) : 0.3);
+  const apiResolved = await resolveAiResultWithApi(aiMessages, model, provider, firstResult, req, { documents, temperature: resolvedTemperature });
   const result = normalizeAiResultShape(apiResolved.result);
   return { ...apiResolved, businessResult: null };
 }
@@ -4837,7 +4840,7 @@ function buildGeminiContentParts(content) {
   return output;
 }
 
-function buildGeminiInteractionPayload(messages = [], model) {
+function buildGeminiInteractionPayload(messages = [], model, options = {}) {
   const systemMessages = [];
   const inputParts = [];
   let hasImage = false;
@@ -4855,7 +4858,7 @@ function buildGeminiInteractionPayload(messages = [], model) {
     inputParts.push(...parts);
   }
   const inputText = inputParts.map((part) => part.type === "text" ? part.text : "").filter(Boolean).join("\n\n");
-  return {
+  const payload = {
     model,
     store: false,
     ...(systemMessages.length ? { system_instruction: systemMessages.join("\n\n") } : {}),
@@ -4863,6 +4866,10 @@ function buildGeminiInteractionPayload(messages = [], model) {
       ? (inputParts.length ? inputParts : [{ type: "text", text: "Hãy trả lời theo hướng dẫn hệ thống." }])
       : (inputText || "Hãy trả lời theo hướng dẫn hệ thống."),
   };
+  if (options.temperature !== undefined && options.temperature !== null && !isNaN(options.temperature)) {
+    payload.generation_config = { temperature: Number(options.temperature) };
+  }
+  return payload;
 }
 
 function extractGeminiInteractionText(data, rawText) {
@@ -4951,7 +4958,10 @@ async function callPuterChatWithRotation(req, messages, model, options = {}) {
   const errors = [];
   for (const key of keys) {
     try {
-      const response = await fetch("https://api.puter.com/drivers/call", {
+        const temperatureParam = options.temperature !== undefined && options.temperature !== null && !isNaN(options.temperature)
+          ? Number(options.temperature)
+          : undefined;
+        const response = await fetch("https://api.puter.com/drivers/call", {
         method: "POST",
         signal: options.signal,
         headers: {
@@ -4966,7 +4976,7 @@ async function callPuterChatWithRotation(req, messages, model, options = {}) {
           driver: "ai-chat",
           test_mode: false,
           method: "complete",
-          args: { messages, model, ...(useVision ? { vision: true } : {}) },
+          args: { messages, model, ...(temperatureParam !== undefined ? { temperature: temperatureParam } : {}), ...(useVision ? { vision: true } : {}) },
           auth_token: key.api_key,
         }),
       });
@@ -4990,7 +5000,7 @@ async function callPuterChatWithRotation(req, messages, model, options = {}) {
               driver: "ai-chat",
               test_mode: false,
               method: "complete",
-              args: { messages: textOnlyMessages, model },
+              args: { messages: textOnlyMessages, model, ...(temperatureParam !== undefined ? { temperature: temperatureParam } : {}) },
               auth_token: key.api_key,
             }),
           });
@@ -5049,7 +5059,7 @@ async function callGeminiChatWithRotation(_req, messages, model, options = {}) {
   }
 
   const cleanModel = String(model || "").replace(/^gemini:/, "") || "gemini-3.6-flash";
-  const payload = buildGeminiInteractionPayload(messages, cleanModel);
+  const payload = buildGeminiInteractionPayload(messages, cleanModel, options);
   const errors = [];
   for (const key of keys) {
     try {
@@ -11297,12 +11307,13 @@ async function handleZaloAiAutoReply({ conversationId, accountId, userId, aiJobK
     const aiDocuments = buildBotAiDocumentsForProvider({ provider, bot, trainingRows, productRows });
     const hasVisionInput = chatHistory.some((item) => Array.isArray(item.content));
     aiPayload = buildAiProviderPayload({ provider, messages: aiMessages, model, vision: hasVisionInput, documents: aiDocuments });
-    const firstAiResult = await callAiChatWithRotation({ provider, req: null, messages: aiMessages, model, options: { vision: hasVisionInput, signal: aiAbortSignal, documents: aiDocuments } });
+    const botTemperature = bot.temperature !== undefined && bot.temperature !== null ? Number(bot.temperature) : 0.3;
+    const firstAiResult = await callAiChatWithRotation({ provider, req: null, messages: aiMessages, model, options: { vision: hasVisionInput, signal: aiAbortSignal, documents: aiDocuments, temperature: botTemperature } });
     if (await shouldCancelAiAutoReply({ conversationId, userId, cursor: startCursor, aiJobKey, aiJobVersion })) {
       await logAiBotUsage({ userId, botId: bot.id, sourceRefId: account.id, conversation, status: "empty", replyCount: 0, payload: aiPayload, raw: { cancelled: true, reason: "newer_customer_message_before_business_tools", initial_ai_result: firstAiResult } });
       return;
     }
-    const { result: aiResult, apiResult, initialResult, businessResult } = await resolveAiResultWithBusinessTools({ aiMessages, model, provider, firstResult: firstAiResult, userId, bot, conversation, sourceRefId: account.id, signal: aiAbortSignal, documents: aiDocuments });
+    const { result: aiResult, apiResult, initialResult, businessResult } = await resolveAiResultWithBusinessTools({ aiMessages, model, provider, firstResult: firstAiResult, userId, bot, conversation, sourceRefId: account.id, signal: aiAbortSignal, documents: aiDocuments, temperature: botTemperature });
     const aiUsagePayload = buildAiUsageLogPayload(aiPayload, {
       ai_result: aiResult,
       api_result: apiResult,
@@ -11443,12 +11454,13 @@ async function handleFacebookAiAutoReply({ conversationId, pageId, userId, aiJob
     const aiDocuments = buildBotAiDocumentsForProvider({ provider, bot, trainingRows, productRows });
     const hasVisionInput = chatHistory.some((item) => Array.isArray(item.content));
     aiPayload = buildAiProviderPayload({ provider, messages: aiMessages, model, vision: hasVisionInput, documents: aiDocuments });
-    const firstAiResult = await callAiChatWithRotation({ provider, req: null, messages: aiMessages, model, options: { vision: hasVisionInput, signal: aiAbortSignal, documents: aiDocuments } });
+    const botTemperature = bot.temperature !== undefined && bot.temperature !== null ? Number(bot.temperature) : 0.3;
+    const firstAiResult = await callAiChatWithRotation({ provider, req: null, messages: aiMessages, model, options: { vision: hasVisionInput, signal: aiAbortSignal, documents: aiDocuments, temperature: botTemperature } });
     if (await shouldCancelAiAutoReply({ conversationId, userId, cursor: startCursor, aiJobKey, aiJobVersion })) {
       await logAiBotUsage({ userId, botId: bot.id, source: "fanpage", sourceRefId: page.id, conversation, status: "empty", replyCount: 0, payload: aiPayload, raw: { cancelled: true, reason: "newer_customer_message_before_business_tools", initial_ai_result: firstAiResult } });
       return;
     }
-    const { result: aiResult, apiResult, initialResult, businessResult } = await resolveAiResultWithBusinessTools({ aiMessages, model, provider, firstResult: firstAiResult, userId, bot, conversation, sourceRefId: page.id, signal: aiAbortSignal, documents: aiDocuments });
+    const { result: aiResult, apiResult, initialResult, businessResult } = await resolveAiResultWithBusinessTools({ aiMessages, model, provider, firstResult: firstAiResult, userId, bot, conversation, sourceRefId: page.id, signal: aiAbortSignal, documents: aiDocuments, temperature: botTemperature });
     const aiUsagePayload = buildAiUsageLogPayload(aiPayload, {
       ai_result: aiResult,
       api_result: apiResult,
@@ -11590,12 +11602,13 @@ async function handleWebchatAiAutoReply({ conversationId, widgetId, userId, aiJo
     const aiDocuments = buildBotAiDocumentsForProvider({ provider, bot, trainingRows, productRows });
     const hasVisionInput = chatHistory.some((item) => Array.isArray(item.content));
     aiPayload = buildAiProviderPayload({ provider, messages: aiMessages, model, vision: hasVisionInput, documents: aiDocuments });
-    const firstAiResult = await callAiChatWithRotation({ provider, req: null, messages: aiMessages, model, options: { vision: hasVisionInput, signal: aiAbortSignal, documents: aiDocuments } });
+    const botTemperature = bot.temperature !== undefined && bot.temperature !== null ? Number(bot.temperature) : 0.3;
+    const firstAiResult = await callAiChatWithRotation({ provider, req: null, messages: aiMessages, model, options: { vision: hasVisionInput, signal: aiAbortSignal, documents: aiDocuments, temperature: botTemperature } });
     if (await shouldCancelAiAutoReply({ conversationId, userId, cursor: startCursor, aiJobKey, aiJobVersion })) {
       await logAiBotUsage({ userId, botId: bot.id, source: "webchat", sourceRefId: widget.id, conversation, status: "empty", replyCount: 0, payload: aiPayload, raw: { cancelled: true, reason: "newer_customer_message_before_business_tools", initial_ai_result: firstAiResult } });
       return;
     }
-    const { result: aiResult, apiResult, initialResult, businessResult } = await resolveAiResultWithBusinessTools({ aiMessages, model, provider, firstResult: firstAiResult, userId, bot, conversation, sourceRefId: widget.id, signal: aiAbortSignal, documents: aiDocuments });
+    const { result: aiResult, apiResult, initialResult, businessResult } = await resolveAiResultWithBusinessTools({ aiMessages, model, provider, firstResult: firstAiResult, userId, bot, conversation, sourceRefId: widget.id, signal: aiAbortSignal, documents: aiDocuments, temperature: botTemperature });
     const aiUsagePayload = buildAiUsageLogPayload(aiPayload, {
       ai_result: aiResult,
       api_result: apiResult,
@@ -16813,7 +16826,7 @@ async function aiBotRows(userId) {
   const where = adminAll ? "" : "WHERE b.user_id = ?";
   const params = adminAll ? [] : [userId];
   return query(
-    `SELECT b.id, b.full_name, b.gender, b.model_id, b.personality_description, b.extra_description, b.introduction_prompt, b.status,
+    `SELECT b.id, b.full_name, b.gender, b.temperature, b.model_id, b.personality_description, b.extra_description, b.introduction_prompt, b.status,
             DATE_FORMAT(b.created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
             DATE_FORMAT(b.updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at,
             m.puter_id AS model_puter_id, m.model_id AS model_code, m.name AS model_name, m.provider AS model_provider,
@@ -17044,6 +17057,12 @@ route(["/api/ai-bots"], "post", [requireUser, async (req, res, next) => {
     const modelId = Number(req.body.model_id || 0);
     const personalityDescription = cleanString(req.body.personality_description);
     const extraDescription = cleanString(req.body.extra_description);
+    let temperature = req.body.temperature !== undefined && req.body.temperature !== null && req.body.temperature !== ""
+      ? Number(req.body.temperature)
+      : 0.3;
+    if (isNaN(temperature) || temperature < 0 || temperature > 2) {
+      return jsonError(res, 422, "Temperature phải nằm trong khoảng từ 0.0 đến 2.0.");
+    }
 
     if (!fullName) return jsonError(res, 422, "Vui lòng nhập họ và tên bot AI.");
     if (!gender) return jsonError(res, 422, "Vui lòng chọn giới tính bot AI.");
@@ -17057,9 +17076,9 @@ route(["/api/ai-bots"], "post", [requireUser, async (req, res, next) => {
     }
 
     await exec(
-      `INSERT INTO ai_bots (user_id, full_name, gender, model_id, personality_description, extra_description, introduction_prompt, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
-      [req.user.id, fullName, gender, modelId, personalityDescription, extraDescription, DEFAULT_BOT_INTRODUCTION_PROMPT]
+      `INSERT INTO ai_bots (user_id, full_name, gender, temperature, model_id, personality_description, extra_description, introduction_prompt, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
+      [req.user.id, fullName, gender, temperature, modelId, personalityDescription, extraDescription, DEFAULT_BOT_INTRODUCTION_PROMPT]
     );
 
     await logActivity(req.user.id, req, {
@@ -17088,6 +17107,12 @@ route(["/api/ai-bots/:id"], "put", [requireUser, async (req, res, next) => {
     const personalityDescription = cleanString(req.body.personality_description) || bot.personality_description;
     const extraDescription = cleanString(req.body.extra_description);
     const status = cleanString(req.body.status) || bot.status;
+    let temperature = req.body.temperature !== undefined && req.body.temperature !== null && req.body.temperature !== ""
+      ? Number(req.body.temperature)
+      : (bot.temperature !== undefined && bot.temperature !== null ? Number(bot.temperature) : 0.3);
+    if (isNaN(temperature) || temperature < 0 || temperature > 2) {
+      return jsonError(res, 422, "Temperature phải nằm trong khoảng từ 0.0 đến 2.0.");
+    }
 
     if (!["active", "inactive"].includes(status)) return jsonError(res, 422, "Trạng thái bot không hợp lệ.");
     if (!fullName) return jsonError(res, 422, "Vui lòng nhập họ và tên bot AI.");
@@ -17100,9 +17125,9 @@ route(["/api/ai-bots/:id"], "put", [requireUser, async (req, res, next) => {
 
     await exec(
       `UPDATE ai_bots
-       SET full_name = ?, gender = ?, model_id = ?, personality_description = ?, extra_description = ?, status = ?
+       SET full_name = ?, gender = ?, temperature = ?, model_id = ?, personality_description = ?, extra_description = ?, status = ?
        WHERE id = ? AND user_id = ?`,
-      [fullName, gender, modelId, personalityDescription, extraDescription, status, bot.id, ownerId]
+      [fullName, gender, temperature, modelId, personalityDescription, extraDescription, status, bot.id, ownerId]
     );
 
     res.json({ success: true, message: "Đã cập nhật bot AI.", bots: (await aiBotRows(req.user.level === "admin" ? "admin_all" : req.user.id)).map(publicAiBot) });
@@ -17475,8 +17500,9 @@ route(["/api/ai-bots/:botId/test"], "post", [requireUser, async (req, res, next)
       extraUserMessage: { role: "user", content: userContent },
     });
     const aiDocuments = buildBotAiDocumentsForProvider({ provider, bot, trainingRows, productRows });
-    const firstAiResult = await callAiChatWithRotation({ provider, req, messages: testAiMessages, model, options: { vision: Boolean(testImage) || chatHistory.some((item) => Array.isArray(item.content)), documents: aiDocuments } });
-    const { result: aiResult, apiResult, initialResult, businessResult } = await resolveAiResultForBotTest({ aiMessages: testAiMessages, model, provider, firstResult: firstAiResult, req, bot, documents: aiDocuments });
+    const botTemperature = bot.temperature !== undefined && bot.temperature !== null ? Number(bot.temperature) : 0.3;
+    const firstAiResult = await callAiChatWithRotation({ provider, req, messages: testAiMessages, model, options: { vision: Boolean(testImage) || chatHistory.some((item) => Array.isArray(item.content)), documents: aiDocuments, temperature: botTemperature } });
+    const { result: aiResult, apiResult, initialResult, businessResult } = await resolveAiResultForBotTest({ aiMessages: testAiMessages, model, provider, firstResult: firstAiResult, req, bot, documents: aiDocuments, temperature: botTemperature });
 
     res.json({ success: true, result: aiResult, model, api_result: apiResult, business_result: businessResult, initial_result: initialResult });
   } catch (error) {

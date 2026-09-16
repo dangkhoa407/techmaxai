@@ -594,6 +594,7 @@ export type AiBot = {
   id: number;
   full_name: string;
   gender: string;
+  temperature?: number;
   personality_description: string;
   extra_description: string;
   introduction_prompt: string;
@@ -2198,6 +2199,7 @@ export async function deleteLiveChatWidget(widgetId: number): Promise<LiveChatWi
 export async function createAiBot(data: {
   full_name: string;
   gender: string;
+  temperature?: number;
   model_id: number;
   personality_description: string;
   extra_description?: string;
@@ -2222,6 +2224,7 @@ export async function createAiBot(data: {
 export async function updateAiBot(botId: number, data: {
   full_name?: string;
   gender?: string;
+  temperature?: number;
   model_id?: number;
   personality_description?: string;
   extra_description?: string;

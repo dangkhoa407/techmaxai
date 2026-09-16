@@ -223,6 +223,14 @@ export default function BotTestPage() {
           <dl className="chat-detail-list">
             <div><dt>Model</dt><dd>{bot.model ? `${bot.model.provider || "AI"} - ${bot.model.name}` : "-"}</dd></div>
             <div><dt>Giới tính</dt><dd>{genderLabel(bot.gender)}</dd></div>
+            <div>
+              <dt>Temperature</dt>
+              <dd>
+                <span className={`status ${(bot.temperature ?? 0.3) <= 0.3 ? "green" : (bot.temperature ?? 0.3) <= 0.7 ? "blue" : "orange"}`} style={{ fontSize: 12, padding: "2px 8px" }}>
+                  {bot.temperature !== undefined && bot.temperature !== null ? Number(bot.temperature).toFixed(2) : "0.30"}
+                </span>
+              </dd>
+            </div>
             <div><dt>Nội dung đào tạo</dt><dd>{trainingItems.length}</dd></div>
             <div><dt>Ngày tạo</dt><dd>{bot.created_at || "-"}</dd></div>
           </dl>
