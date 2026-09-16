@@ -63,6 +63,44 @@ function formatScheduleTimes(times?: string[]) {
   return values.length ? values.join(", ") : "";
 }
 
+function campaignScheduleText(campaign: ZaloCampaign) {
+  const isRecurring = campaign.schedule_type === "daily" || campaign.schedule_type === "custom";
+  if (isRecurring) {
+    const parts = [
+      `tuỳ chỉnh ${formatWeekdays(campaign.days_of_week)}`,
+      formatScheduleTimes(campaign.scheduled_times) ? `giờ: ${formatScheduleTimes(campaign.scheduled_times)}` : "",
+    ].filter(Boolean).join(", ");
+
+    if (campaign.status === "running") {
+      return `${parts}, đang gửi lượt này...`;
+    }
+    if (campaign.status === "paused") {
+      return `${parts}, đang tạm dừng`;
+    }
+    if (campaign.status === "completed") {
+      return `${parts}, đã hoàn tất${campaign.finished_at ? ` lúc ${formatDate(campaign.finished_at)}` : ""}`;
+    }
+    if (campaign.status === "scheduled" && campaign.next_run_at) {
+      return `${parts}, lần kế tiếp ${formatDate(campaign.next_run_at)}`;
+    }
+    return parts;
+  }
+
+  if (campaign.status === "running") {
+    return "Đang gửi chiến dịch...";
+  }
+  if (campaign.status === "completed") {
+    return `Đã hoàn tất${campaign.finished_at ? ` lúc ${formatDate(campaign.finished_at)}` : ""}`;
+  }
+  const dates = campaign.scheduled_datetimes?.length
+    ? `mốc: ${campaign.scheduled_datetimes.map(formatDate).join(", ")}`
+    : `gửi lúc ${formatDate(campaign.scheduled_at)}`;
+  if (campaign.status === "scheduled" && campaign.next_run_at) {
+    return `${dates}, lần kế tiếp ${formatDate(campaign.next_run_at)}`;
+  }
+  return dates;
+}
+
 function statusText(status: ZaloCampaign["status"] | string) {
   const map: Record<string, string> = {
     scheduled: "Đã lên lịch",
@@ -856,7 +894,7 @@ export default function CampaignsPage() {
                     <div>
                       <h3>{campaign.name}</h3>
                       <p className="muted">
-                        {campaign.account_name || campaign.own_id} · {campaign.target_type === "friend" ? "Bạn bè" : campaign.target_type === "member" ? "Thành viên" : "Nhóm"} · {isRecurringCampaign ? `tuỳ chỉnh ${formatWeekdays(campaign.days_of_week)}${formatScheduleTimes(campaign.scheduled_times) ? `, giờ: ${formatScheduleTimes(campaign.scheduled_times)}` : ""}, lần kế tiếp ${formatDate(campaign.next_run_at || campaign.scheduled_at)}` : `gửi lúc ${formatDate(campaign.scheduled_at)}${campaign.scheduled_datetimes?.length ? `, mốc: ${campaign.scheduled_datetimes.map(formatDate).join(", ")}` : ""}`}
+                        {campaign.account_name || campaign.own_id} · {campaign.target_type === "friend" ? "Bạn bè" : campaign.target_type === "member" ? "Thành viên" : "Nhóm"} · {campaignScheduleText(campaign)}
                       </p>
                     </div>
                     <div className="row" style={{ justifyContent: "flex-end" }}>

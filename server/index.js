@@ -9691,7 +9691,7 @@ async function processZaloCampaign(campaignId) {
       }
       await consumeCampaignUsage(owner.id, 1);
       const startResult = await exec(
-        "UPDATE zalo_campaigns SET status = 'running', started_at = COALESCE(started_at, NOW()), last_error = NULL WHERE id = ? AND status = 'scheduled'",
+        "UPDATE zalo_campaigns SET status = 'running', started_at = COALESCE(started_at, NOW()), next_run_at = NULL, last_error = NULL WHERE id = ? AND status = 'scheduled'",
         [campaign.id]
       );
       if (Number(startResult?.affectedRows || 0) === 0) return;
