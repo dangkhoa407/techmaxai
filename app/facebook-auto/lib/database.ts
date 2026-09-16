@@ -19,12 +19,17 @@ export function getFacebookAutoDatabase() {
       password: process.env.DB_PASS || "",
       database: process.env.DB_NAME || "techmax_app",
       charset: "utf8mb4",
+      timezone: "+07:00",
       waitForConnections: true,
       connectionLimit: FACEBOOK_AUTO_CONNECTION_LIMIT,
       maxIdle: Math.min(FACEBOOK_AUTO_CONNECTION_LIMIT, 5),
       idleTimeout: 60_000,
       queueLimit: 0
     });
+    globalDatabase.facebookAutoDatabase.on("connection", (connection: any) => {
+      connection.query("SET time_zone = '+07:00'");
+    });
+    globalDatabase.facebookAutoDatabase.query("SET time_zone = '+07:00'").catch(() => {});
   }
   return globalDatabase.facebookAutoDatabase;
 }

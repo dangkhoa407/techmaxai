@@ -3006,6 +3006,7 @@ export async function createZaloCampaign(data: {
   group_ids: string[];
   target_ids?: string[];
   image_data_url?: string | null;
+  client_time?: string;
 }): Promise<ZaloCampaign[]> {
   const token = getToken();
   if (!token) throw new Error("Bạn cần đăng nhập.");

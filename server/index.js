@@ -1,3 +1,4 @@
+process.env.TZ = "Asia/Ho_Chi_Minh";
 const express = require("express");
 const cors = require("cors");
 const crypto = require("crypto");
@@ -273,9 +274,7 @@ function nowSql(date = new Date()) {
 }
 
 function addDays(date, days) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
+  return new Date(new Date(date).getTime() + Number(days || 0) * 86400000);
 }
 
 function cleanString(value) {
@@ -597,8 +596,10 @@ async function ensureSchema() {
     host: DB_HOST,
     user: DB_USER,
     password: DB_PASS,
+    timezone: "+07:00",
     multipleStatements: true,
   });
+  await root.query("SET time_zone = '+07:00'").catch(() => {});
   await root.query(`CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_vietnamese_ci`);
   await root.end();
 
@@ -608,6 +609,7 @@ async function ensureSchema() {
     password: DB_PASS,
     database: DB_NAME,
     charset: DB_CHARSET,
+    timezone: "+07:00",
     waitForConnections: true,
     connectionLimit: DB_CONNECTION_LIMIT,
     maxIdle: DB_MAX_IDLE,
@@ -615,6 +617,11 @@ async function ensureSchema() {
     queueLimit: 0,
     namedPlaceholders: false,
   });
+
+  pool.on("connection", (connection) => {
+    connection.query("SET time_zone = '+07:00'");
+  });
+  await pool.query("SET time_zone = '+07:00'").catch(() => {});
 
   await pool.query(`ALTER DATABASE \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_vietnamese_ci`);
   await pool.query(`
@@ -2869,6 +2876,45 @@ function appDateFromDateAndTime(dateText, timeText) {
   return new Date(`${date}T${time}:00+07:00`);
 }
 
+function getVnDateParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: APP_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(date).reduce((acc, part) => {
+    if (part.type !== "literal") acc[part.type] = part.value;
+    return acc;
+  }, {});
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+    second: Number(parts.second),
+    dateText: `${parts.year}-${parts.month}-${parts.day}`,
+  };
+}
+
+function getVnDateTextWithOffset(fromDate = new Date(), offsetDays = 0) {
+  const parts = getVnDateParts(fromDate);
+  const d = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + offsetDays, 12, 0, 0));
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function getVnDayOfWeek(dateText) {
+  const [y, m, d] = String(dateText).slice(0, 10).split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d, 12, 0, 0)).getUTCDay();
+}
+
 function appDateText(date = new Date()) {
   return nowSql(date).slice(0, 10);
 }
@@ -2892,37 +2938,38 @@ function nextCampaignRun(baseValue, daysOfWeek, fromDate = new Date(), scheduled
   const days = selectedDays.length ? selectedDays : [0, 1, 2, 3, 4, 5, 6];
   const times = normalizeCampaignTimes(scheduledTimes, base);
   const from = new Date(fromDate);
+  const fromTime = from.getTime();
   for (let offset = 0; offset <= 14; offset += 1) {
-    const dayCursor = new Date(from);
-    dayCursor.setDate(from.getDate() + offset);
-    const dateText = appDateText(dayCursor);
+    const dateText = getVnDateTextWithOffset(from, offset);
+    const dayOfWeek = getVnDayOfWeek(dateText);
+    if (!days.includes(dayOfWeek)) continue;
     for (const time of times) {
       const candidate = appDateFromDateAndTime(dateText, time);
-      if (!candidate || candidate.getTime() <= from.getTime()) continue;
-      if (days.includes(candidate.getDay())) return candidate;
+      if (!candidate || candidate.getTime() <= fromTime) continue;
+      return candidate;
     }
   }
   return addDays(from, 1);
 }
 
 function nextOneTimeCampaignRun(baseValue, scheduledTimes, fromDate = new Date(), scheduledDateTimes = null) {
+  const from = new Date(fromDate);
+  const fromTime = from.getTime();
   if (scheduledDateTimes) {
     const base = parseCampaignScheduledDate(baseValue || fromDate, fromDate);
     const dateTimes = normalizeCampaignDateTimes(scheduledDateTimes, base);
-    const from = new Date(fromDate);
     for (const dateTime of dateTimes) {
       const candidate = appDateFromDateAndTime(dateTime.slice(0, 10), dateTime.slice(11, 16));
-      if (candidate && candidate.getTime() > from.getTime()) return candidate;
+      if (candidate && candidate.getTime() > fromTime) return candidate;
     }
     return null;
   }
   const base = parseCampaignScheduledDate(baseValue || fromDate, fromDate);
-  const dateText = appDateText(base);
+  const dateText = getVnDateTextWithOffset(base, 0);
   const times = normalizeCampaignTimes(scheduledTimes, base);
-  const from = new Date(fromDate);
   for (const time of times) {
     const candidate = appDateFromDateAndTime(dateText, time);
-    if (candidate && candidate.getTime() > from.getTime()) return candidate;
+    if (candidate && candidate.getTime() > fromTime) return candidate;
   }
   return null;
 }
@@ -15683,11 +15730,13 @@ route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
             [req.user.id, accountId, ...selectedTargetIds]
           );
       if (!targets.length) return jsonError(res, 422, targetType === "friend" ? "Không tìm thấy bạn bè Zalo hợp lệ. Vui lòng quét bạn bè lại." : targetType === "member" ? "Không tìm thấy thành viên Zalo hợp lệ. Vui lòng quét thành viên lại." : "Không tìm thấy nhóm Zalo hợp lệ. Vui lòng quét nhóm lại.");
+      const clientTimeRaw = cleanString(req.body.client_time || req.body.clientTime || req.body.client_now);
+      const clientNow = clientTimeRaw ? parseCampaignScheduledDate(clientTimeRaw, new Date()) : new Date();
       const nextRunAt = sendNow
         ? null
         : isRecurringSchedule
-          ? nextCampaignRun(scheduledDate, daysOfWeek, new Date(), scheduledTimes)
-          : nextOneTimeCampaignRun(scheduledDate, [], new Date(), scheduledDateTimes) || scheduledDate;
+          ? nextCampaignRun(scheduledDate, daysOfWeek, clientNow, scheduledTimes)
+          : nextOneTimeCampaignRun(scheduledDate, [], clientNow, scheduledDateTimes) || scheduledDate;
       const result = await exec(
         `INSERT INTO zalo_campaigns (user_id, zalo_account_id, name, message, image_json, scheduled_at, next_run_at, schedule_type, days_of_week_json, scheduled_times_json, scheduled_datetimes_json, target_type, delay_seconds, total_groups)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,

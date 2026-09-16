@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useMemo, useState } from "react";
 import { AppFrame, Icon, PageHeader, StatCard } from "../components";
@@ -413,6 +413,7 @@ export default function CampaignsPage() {
         group_ids: selectedTargets,
         target_ids: selectedTargets,
         image_data_url: form.image_data_url || null,
+        client_time: new Date().toISOString(),
       });
       if (nextCampaigns.length) {
         setCampaigns(nextCampaigns);
