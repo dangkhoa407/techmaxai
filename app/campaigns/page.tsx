@@ -164,6 +164,7 @@ export default function CampaignsPage() {
   const [saving, setSaving] = useState(false);
   const [selectedAccountId, setSelectedAccountId] = useState<number>(0);
   const [targetType, setTargetType] = useState<"group" | "friend" | "member">("group");
+  const [sendMode, setSendMode] = useState<"all" | "custom">("all");
   const [sourceGroupId, setSourceGroupId] = useState("");
   const [selectedTargets, setSelectedTargets] = useState<string[]>([]);
   const [campaignTargetPages, setCampaignTargetPages] = useState<Record<number, number>>({});
@@ -399,7 +400,7 @@ export default function CampaignsPage() {
       showError("Vui lòng chọn tài khoản Zalo đang hoạt động.");
       return;
     }
-    if (!selectedTargets.length) {
+    if (sendMode === "custom" && !selectedTargets.length) {
       showError(`Vui lòng chọn ít nhất một ${targetLabel}.`);
       return;
     }
@@ -438,6 +439,7 @@ export default function CampaignsPage() {
       const nextCampaigns = await createZaloCampaign({
         zalo_account_id: selectedAccountId,
         target_type: targetType,
+        send_mode: sendMode,
         source_group_id: targetType === "member" ? sourceGroupId : undefined,
         name: form.name.trim() || "Chiến dịch Zalo",
         message: form.message,
@@ -448,8 +450,8 @@ export default function CampaignsPage() {
         send_now: form.schedule_type === "now",
         scheduled_at: customScheduledAt,
         delay_seconds: Math.max(minDelaySeconds, form.delay_seconds),
-        group_ids: selectedTargets,
-        target_ids: selectedTargets,
+        group_ids: sendMode === "all" ? [] : selectedTargets,
+        target_ids: sendMode === "all" ? [] : selectedTargets,
         image_data_url: form.image_data_url || null,
         client_time: new Date().toISOString(),
       });
@@ -591,7 +593,7 @@ export default function CampaignsPage() {
                 <p className="subtitle">Chọn tài khoản, chọn nhóm hoặc bạn bè, nhập nội dung và đặt lịch gửi.</p>
               </div>
               <div className="row" style={{ justifyContent: "flex-end" }}>
-                <span className="status orange">{selectedTargets.length} {targetLabel}</span>
+                <span className="status orange">{sendMode === "all" ? `Tất cả ${targetLabel}` : `${selectedTargets.length} ${targetLabel}`}</span>
                 <button className="btn btn-secondary" onClick={() => setComposeOpen(false)} type="button">
                   <Icon name="x" size={16} /> Đóng
                 </button>
@@ -635,7 +637,6 @@ export default function CampaignsPage() {
                   }
                   setSelectedTargets([]);
                   setSearch("");
-                  if (nextTargetType === "friend") setTargetModalOpen(false);
                   if (nextTargetType !== "member") setSourceGroupId("");
                 }}
               >
@@ -643,11 +644,38 @@ export default function CampaignsPage() {
                 <option value="friend">Bạn bè Zalo</option>
                 <option value="member">Thành viên trong nhóm</option>
               </select>
-              {targetType !== "friend" ? (
-                <button className="btn btn-secondary" onClick={() => setTargetModalOpen(true)} type="button">
-                  <Icon name="groups" size={17} /> Xem nhóm
+            </label>
+
+            <label>
+              <span>Hình thức gửi</span>
+              <select
+                className="input"
+                value={sendMode}
+                onChange={(event) => {
+                  const nextMode = event.target.value as "all" | "custom";
+                  setSendMode(nextMode);
+                  if (nextMode === "all") {
+                    setTargetModalOpen(false);
+                  }
+                }}
+              >
+                <option value="all">Gửi tất cả</option>
+                <option value="custom">Gửi tuỳ chỉnh</option>
+              </select>
+              {sendMode === "custom" ? (
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => setTargetModalOpen(true)}
+                  type="button"
+                  style={{ marginTop: 4 }}
+                >
+                  <Icon name={targetType === "friend" ? "users" : "groups"} size={17} /> {targetType === "friend" ? "Xem bạn bè" : targetType === "member" ? "Xem thành viên" : "Xem nhóm"} {selectedTargets.length > 0 ? `(${selectedTargets.length} đã chọn)` : ""}
                 </button>
-              ) : null}
+              ) : (
+                <small className="muted" style={{ marginTop: 4, display: "block" }}>
+                  Hệ thống sẽ tự động quét lại toàn bộ {targetLabel} trước mỗi lần gửi.
+                </small>
+              )}
             </label>
 
             {targetType === "member" ? (
@@ -811,7 +839,7 @@ export default function CampaignsPage() {
               </label>
             </div>
 
-            <button className="btn btn-red" disabled={saving || !selectedAccountId || !selectedTargets.length} type="submit">
+            <button className="btn btn-red" disabled={saving || !selectedAccountId || (sendMode === "custom" && !selectedTargets.length)} type="submit">
               <Icon name="schedule_send" size={18} /> {saving ? "Đang lưu..." : form.schedule_type === "now" ? "Gửi ngay" : form.schedule_type === "custom" ? "Lên lịch tuỳ chỉnh" : "Lên lịch gửi"}
             </button>
           </form>
@@ -894,7 +922,7 @@ export default function CampaignsPage() {
                     <div className="campaign-card-info">
                       <h3>{campaign.name}</h3>
                       <p className="muted">
-                        {campaign.account_name || campaign.own_id} · {campaign.target_type === "friend" ? "Bạn bè" : campaign.target_type === "member" ? "Thành viên" : "Nhóm"} · {campaignScheduleText(campaign)}
+                        {campaign.account_name || campaign.own_id} · {campaign.target_type === "friend" ? "Bạn bè" : campaign.target_type === "member" ? "Thành viên" : "Nhóm"} · {campaign.send_mode === "all" ? "Gửi tất cả" : "Tuỳ chỉnh"} · {campaignScheduleText(campaign)}
                       </p>
                     </div>
                     <div className="row campaign-card-actions" style={{ justifyContent: "flex-end" }}>
@@ -924,7 +952,7 @@ export default function CampaignsPage() {
                   <div className="campaign-progress-row">
                     <span>{campaign.sent_count}/{campaign.total_groups} đã gửi</span>
                     <span>{campaign.failed_count} lỗi</span>
-                    <span>{isRecurringCampaign ? "Tuỳ chỉnh" : "Một lần"}</span>
+                    <span>{campaign.send_mode === "all" ? "Tất cả" : "Tuỳ chọn"}</span>
                     <span>Delay {campaign.delay_seconds} giây</span>
                   </div>
                   {campaign.last_error ? <div className="form-message error campaign-last-error">{campaign.last_error}</div> : null}
@@ -987,7 +1015,7 @@ export default function CampaignsPage() {
           )}
         </section>
 
-        {targetModalOpen && targetType !== "friend" ? (
+        {targetModalOpen && sendMode === "custom" ? (
           <div className="campaign-target-modal-backdrop" role="presentation" onMouseDown={() => setTargetModalOpen(false)}>
             <section className="card campaign-groups campaign-target-modal" role="dialog" aria-modal="true" aria-labelledby="campaign-target-modal-title" onMouseDown={(event) => event.stopPropagation()}>
               <div className="between campaign-panel-head">

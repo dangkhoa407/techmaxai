@@ -218,6 +218,7 @@ export type ZaloCampaign = {
   scheduled_times?: string[];
   scheduled_datetimes?: string[];
   target_type?: "group" | "friend" | "member";
+  send_mode?: "all" | "custom";
   delay_seconds: number;
   status: "scheduled" | "running" | "paused" | "completed" | "cancelled" | "failed";
   total_groups: number;
@@ -2993,6 +2994,7 @@ export async function deleteZaloGroupMember(accountId: number, memberId: string,
 export async function createZaloCampaign(data: {
   zalo_account_id: number;
   target_type?: "group" | "friend" | "member";
+  send_mode?: "all" | "custom";
   source_group_id?: string;
   name: string;
   message: string;

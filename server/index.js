@@ -1384,8 +1384,10 @@ async function ensureSchema() {
   await addColumnIfMissing("zalo_campaigns", "scheduled_times_json", "scheduled_times_json LONGTEXT DEFAULT NULL AFTER days_of_week_json");
   await addColumnIfMissing("zalo_campaigns", "scheduled_datetimes_json", "scheduled_datetimes_json LONGTEXT DEFAULT NULL AFTER scheduled_times_json");
   await addColumnIfMissing("zalo_campaigns", "target_type", "target_type ENUM('group', 'friend', 'member') NOT NULL DEFAULT 'group' AFTER days_of_week_json");
+  await addColumnIfMissing("zalo_campaigns", "send_mode", "send_mode ENUM('all', 'custom') NOT NULL DEFAULT 'custom' AFTER target_type");
   await pool.query("ALTER TABLE zalo_campaigns MODIFY COLUMN schedule_type ENUM('once', 'daily', 'custom') NOT NULL DEFAULT 'once'").catch(() => null);
   await pool.query("ALTER TABLE zalo_campaigns MODIFY COLUMN target_type ENUM('group', 'friend', 'member') NOT NULL DEFAULT 'group'").catch(() => null);
+  await pool.query("ALTER TABLE zalo_campaigns MODIFY COLUMN send_mode ENUM('all', 'custom') NOT NULL DEFAULT 'custom'").catch(() => null);
   await pool.query("ALTER TABLE zalo_campaigns MODIFY COLUMN status ENUM('scheduled', 'running', 'paused', 'completed', 'cancelled', 'failed') NOT NULL DEFAULT 'scheduled'").catch(() => null);
 
   await pool.query(`
@@ -2998,6 +3000,7 @@ function publicZaloCampaign(row, targets = []) {
     scheduled_times: normalizeCampaignTimes(row.scheduled_times_json, row.scheduled_at),
     scheduled_datetimes: normalizeCampaignDateTimes(row.scheduled_datetimes_json, row.scheduled_at),
     target_type: row.target_type || "group",
+    send_mode: row.send_mode || "custom",
     delay_seconds: Number(row.delay_seconds || 0),
     status: row.status,
     total_groups: Number(row.total_groups || 0),
@@ -3043,6 +3046,7 @@ function fallbackPublicZaloCampaign(row, targets = []) {
     scheduled_times: normalizeCampaignTimes(row.scheduled_times_json, row.scheduled_at),
     scheduled_datetimes: normalizeCampaignDateTimes(row.scheduled_datetimes_json, row.scheduled_at),
     target_type: row.target_type || "group",
+    send_mode: row.send_mode || "custom",
     delay_seconds: Number(row.delay_seconds || 0),
     status: row.status || "scheduled",
     total_groups: Number(row.total_groups || 0),
@@ -9697,13 +9701,15 @@ async function processZaloCampaign(campaignId) {
       if (Number(startResult?.affectedRows || 0) === 0) return;
     }
 
+    let pendingCount = 0;
+    let sentCount = 0;
     if (isRecurringCampaign) {
       const [pendingCheck] = await query(
         "SELECT COUNT(*) AS pending_count, SUM(status = 'sent') AS sent_count FROM zalo_campaign_targets WHERE campaign_id = ?",
         [campaign.id]
       );
-      const pendingCount = Number(pendingCheck?.pending_count || 0);
-      const sentCount = Number(pendingCheck?.sent_count || 0);
+      pendingCount = Number(pendingCheck?.pending_count || 0);
+      sentCount = Number(pendingCheck?.sent_count || 0);
 
       // Nếu đang có mục tiêu pending (đang gửi dở hoặc vừa bấm 'Tiếp tục gửi'),
       // TUYỆT ĐỐI KHÔNG reset các mục tiêu đã gửi! Tiếp tục gửi các mục tiêu pending.
@@ -9711,6 +9717,57 @@ async function processZaloCampaign(campaignId) {
       if (pendingCount === 0 && sentCount > 0) {
         await exec("UPDATE zalo_campaign_targets SET status = 'pending', sent_at = NULL, error_message = NULL, raw_json = NULL WHERE campaign_id = ?", [campaign.id]);
         await exec("UPDATE zalo_campaigns SET sent_count = 0, failed_count = 0 WHERE id = ?", [campaign.id]);
+      }
+    }
+
+    if (campaign.send_mode === "all") {
+      const isNewRunStarting = campaign.status === "scheduled" || (isRecurringCampaign && pendingCount === 0 && sentCount > 0);
+      const [checkPending] = await query("SELECT COUNT(*) AS count FROM zalo_campaign_targets WHERE campaign_id = ? AND status = 'pending'", [campaign.id]);
+      const currentPendingCount = Number(checkPending?.count || 0);
+
+      if (isNewRunStarting || currentPendingCount === 0) {
+        try {
+          writeLog("[zalo campaign auto-scan before send started]", { campaignId: campaign.id, targetType: campaign.target_type });
+          if (campaign.target_type === "friend") {
+            await scanZaloFriendsForAccount(campaign.user_id, campaign.zalo_account_id);
+          } else if (campaign.target_type === "member") {
+            await scanZaloGroupMembersForAccount(campaign.user_id, campaign.zalo_account_id, campaign.source_group_id || undefined);
+          } else {
+            await scanZaloGroupsForAccount(campaign.user_id, campaign.zalo_account_id);
+          }
+          writeLog("[zalo campaign auto-scan before send completed]", { campaignId: campaign.id });
+        } catch (scanError) {
+          writeLog("[zalo campaign auto-scan before send error]", { campaignId: campaign.id, error: scanError?.message || String(scanError) });
+        }
+
+        const freshTargets = campaign.target_type === "friend"
+          ? await query(
+            "SELECT friend_id AS target_id, friend_name AS target_name FROM zalo_friends WHERE user_id = ? AND zalo_account_id = ? AND status = 'active' ORDER BY friend_name ASC",
+            [campaign.user_id, campaign.zalo_account_id]
+          )
+          : campaign.target_type === "member"
+            ? await query(
+              `SELECT member_id AS target_id, COALESCE(MAX(NULLIF(member_name, '')), member_id) AS target_name
+               FROM zalo_group_members
+               WHERE user_id = ? AND zalo_account_id = ? AND status = 'active'
+                 ${campaign.source_group_id ? "AND source_group_id = ?" : ""}
+               GROUP BY member_id
+               ORDER BY target_name ASC`,
+              campaign.source_group_id ? [campaign.user_id, campaign.zalo_account_id, campaign.source_group_id] : [campaign.user_id, campaign.zalo_account_id]
+            )
+            : await query(
+              "SELECT group_id AS target_id, group_name AS target_name FROM zalo_groups WHERE user_id = ? AND zalo_account_id = ? AND status = 'active' ORDER BY group_name ASC",
+              [campaign.user_id, campaign.zalo_account_id]
+            );
+
+        if (freshTargets.length > 0) {
+          await exec("DELETE FROM zalo_campaign_targets WHERE campaign_id = ?", [campaign.id]);
+          await pool.query(
+            "INSERT INTO zalo_campaign_targets (campaign_id, group_id, group_name, target_type, status) VALUES ?",
+            [freshTargets.map((t) => [campaign.id, t.target_id, t.target_name, campaign.target_type || "group", "pending"])]
+          );
+          await exec("UPDATE zalo_campaigns SET total_groups = ?, sent_count = 0, failed_count = 0 WHERE id = ?", [freshTargets.length, campaign.id]);
+        }
       }
     }
 
@@ -15704,9 +15761,14 @@ route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
         delaySeconds = Math.max(10, delaySeconds);
       }
 
+      const rawSendMode = cleanString(req.body.send_mode || req.body.sendMode);
+      const sendMode = rawSendMode === "all" ? "all" : "custom";
+
       if (!accountId) return jsonError(res, 422, "Vui lòng chọn tài khoản Zalo.");
-      if ((!message || message.length < 2) && !campaignImage) return jsonError(res, 422, "Vui lòng nhập nội dung tin nhận hoặc chọn ?nh.");
-      if (!selectedTargetIds.length) return jsonError(res, 422, targetType === "friend" ? "Vui lòng chọn ít nhất một bạn bè Zalo." : targetType === "member" ? "Vui lòng chọn ít nhất một thành viên Zalo." : "Vui lòng chọn ít nhất một nhóm Zalo.");
+      if ((!message || message.length < 2) && !campaignImage) return jsonError(res, 422, "Vui lòng nhập nội dung tin nhận hoặc chọn ảnh.");
+      if (sendMode === "custom" && !selectedTargetIds.length) {
+        return jsonError(res, 422, targetType === "friend" ? "Vui lòng chọn ít nhất một bạn bè Zalo." : targetType === "member" ? "Vui lòng chọn ít nhất một thành viên Zalo." : "Vui lòng chọn ít nhất một nhóm Zalo.");
+      }
       if (Number.isNaN(scheduledDate.getTime())) return jsonError(res, 422, "Thời gian gửi không hợp lệ.");
       if (isRecurringSchedule && !daysOfWeek.length) return jsonError(res, 422, "Vui lòng chọn ít nhất một thứ trong tuần.");
 
@@ -15717,32 +15779,92 @@ route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
       if (!accountConnection.ok) {
         return jsonError(res, 422, accountConnection.message || "Tài khoản Zalo đã mất kết nối. Vui lòng đăng nhập lại bằng QR.");
       }
-      const placeholders = selectedTargetIds.map(() => "?").join(",");
       const sourceGroupId = cleanString(req.body.source_group_id || req.body.sourceGroupId);
-      const targets = targetType === "friend"
-        ? await query(
-          `SELECT friend_id AS target_id, friend_name AS target_name
-           FROM zalo_friends
-           WHERE user_id = ? AND zalo_account_id = ? AND status = 'active' AND friend_id IN (${placeholders})`,
-          [req.user.id, accountId, ...selectedTargetIds]
-        )
-        : targetType === "member"
-          ? await query(
+      let targets = [];
+
+      if (sendMode === "all") {
+        if (targetType === "friend") {
+          targets = await query(
+            `SELECT friend_id AS target_id, friend_name AS target_name
+             FROM zalo_friends
+             WHERE user_id = ? AND zalo_account_id = ? AND status = 'active'
+             ORDER BY friend_name ASC`,
+            [req.user.id, accountId]
+          );
+          if (!targets.length) {
+            try {
+              const scanned = await scanZaloFriendsForAccount(req.user.id, accountId);
+              targets = scanned.map((f) => ({ target_id: f.friend_id, target_name: f.friend_name }));
+            } catch (err) {
+              writeLog("[scan_friends on create_campaign error]", err);
+            }
+          }
+        } else if (targetType === "member") {
+          targets = await query(
             `SELECT member_id AS target_id, COALESCE(MAX(NULLIF(member_name, '')), member_id) AS target_name
              FROM zalo_group_members
              WHERE user_id = ? AND zalo_account_id = ? AND status = 'active'
                ${sourceGroupId ? "AND source_group_id = ?" : ""}
-               AND member_id IN (${placeholders})
-             GROUP BY member_id`,
-            sourceGroupId ? [req.user.id, accountId, sourceGroupId, ...selectedTargetIds] : [req.user.id, accountId, ...selectedTargetIds]
-          )
-          : await query(
-            `SELECT group_id AS target_id, group_name AS target_name
-           FROM zalo_groups
-           WHERE user_id = ? AND zalo_account_id = ? AND status = 'active' AND group_id IN (${placeholders})`,
-            [req.user.id, accountId, ...selectedTargetIds]
+             GROUP BY member_id
+             ORDER BY target_name ASC`,
+            sourceGroupId ? [req.user.id, accountId, sourceGroupId] : [req.user.id, accountId]
           );
-      if (!targets.length) return jsonError(res, 422, targetType === "friend" ? "Không tìm thấy bạn bè Zalo hợp lệ. Vui lòng quét bạn bè lại." : targetType === "member" ? "Không tìm thấy thành viên Zalo hợp lệ. Vui lòng quét thành viên lại." : "Không tìm thấy nhóm Zalo hợp lệ. Vui lòng quét nhóm lại.");
+          if (!targets.length) {
+            try {
+              const scanned = await scanZaloGroupMembersForAccount(req.user.id, accountId, sourceGroupId || undefined);
+              targets = scanned.map((m) => ({ target_id: m.member_id, target_name: m.member_name }));
+            } catch (err) {
+              writeLog("[scan_members on create_campaign error]", err);
+            }
+          }
+        } else {
+          targets = await query(
+            `SELECT group_id AS target_id, group_name AS target_name
+             FROM zalo_groups
+             WHERE user_id = ? AND zalo_account_id = ? AND status = 'active'
+             ORDER BY group_name ASC`,
+            [req.user.id, accountId]
+          );
+          if (!targets.length) {
+            try {
+              const scanned = await scanZaloGroupsForAccount(req.user.id, accountId);
+              targets = scanned.map((g) => ({ target_id: g.group_id, target_name: g.group_name }));
+            } catch (err) {
+              writeLog("[scan_groups on create_campaign error]", err);
+            }
+          }
+        }
+        if (sendNow && !targets.length) {
+          return jsonError(res, 422, targetType === "friend" ? "Không tìm thấy bạn bè Zalo để gửi. Vui lòng thử lại." : targetType === "member" ? "Không tìm thấy thành viên Zalo để gửi. Vui lòng thử lại." : "Không tìm thấy nhóm Zalo để gửi. Vui lòng thử lại.");
+        }
+      } else {
+        const placeholders = selectedTargetIds.map(() => "?").join(",");
+        targets = targetType === "friend"
+          ? await query(
+            `SELECT friend_id AS target_id, friend_name AS target_name
+             FROM zalo_friends
+             WHERE user_id = ? AND zalo_account_id = ? AND status = 'active' AND friend_id IN (${placeholders})`,
+            [req.user.id, accountId, ...selectedTargetIds]
+          )
+          : targetType === "member"
+            ? await query(
+              `SELECT member_id AS target_id, COALESCE(MAX(NULLIF(member_name, '')), member_id) AS target_name
+               FROM zalo_group_members
+               WHERE user_id = ? AND zalo_account_id = ? AND status = 'active'
+                 ${sourceGroupId ? "AND source_group_id = ?" : ""}
+                 AND member_id IN (${placeholders})
+               GROUP BY member_id`,
+              sourceGroupId ? [req.user.id, accountId, sourceGroupId, ...selectedTargetIds] : [req.user.id, accountId, ...selectedTargetIds]
+            )
+            : await query(
+              `SELECT group_id AS target_id, group_name AS target_name
+             FROM zalo_groups
+             WHERE user_id = ? AND zalo_account_id = ? AND status = 'active' AND group_id IN (${placeholders})`,
+              [req.user.id, accountId, ...selectedTargetIds]
+            );
+        if (!targets.length) return jsonError(res, 422, targetType === "friend" ? "Không tìm thấy bạn bè Zalo hợp lệ. Vui lòng quét bạn bè lại." : targetType === "member" ? "Không tìm thấy thành viên Zalo hợp lệ. Vui lòng quét thành viên lại." : "Không tìm thấy nhóm Zalo hợp lệ. Vui lòng quét nhóm lại.");
+      }
+
       const clientTimeRaw = cleanString(req.body.client_time || req.body.clientTime || req.body.client_now);
       const clientNow = clientTimeRaw ? parseCampaignScheduledDate(clientTimeRaw, new Date()) : new Date();
       const nextRunAt = sendNow
@@ -15751,15 +15873,17 @@ route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
           ? nextCampaignRun(scheduledDate, daysOfWeek, clientNow, scheduledTimes)
           : nextOneTimeCampaignRun(scheduledDate, [], clientNow, scheduledDateTimes) || scheduledDate;
       const result = await exec(
-        `INSERT INTO zalo_campaigns (user_id, zalo_account_id, name, message, image_json, scheduled_at, next_run_at, schedule_type, days_of_week_json, scheduled_times_json, scheduled_datetimes_json, target_type, delay_seconds, total_groups)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [req.user.id, accountId, name, message || "", safeJson(campaignImage), nowSql(nextRunAt || scheduledDate), nextRunAt ? nowSql(nextRunAt) : null, scheduleType, safeJson(daysOfWeek), safeJson(scheduledTimes), safeJson(scheduledDateTimes), targetType, delaySeconds, targets.length]
+        `INSERT INTO zalo_campaigns (user_id, zalo_account_id, name, message, image_json, scheduled_at, next_run_at, schedule_type, days_of_week_json, scheduled_times_json, scheduled_datetimes_json, target_type, send_mode, delay_seconds, total_groups)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [req.user.id, accountId, name, message || "", safeJson(campaignImage), nowSql(nextRunAt || scheduledDate), nextRunAt ? nowSql(nextRunAt) : null, scheduleType, safeJson(daysOfWeek), safeJson(scheduledTimes), safeJson(scheduledDateTimes), targetType, sendMode, delaySeconds, targets.length]
       );
       const campaignId = result.insertId;
-      await pool.query(
-        "INSERT INTO zalo_campaign_targets (campaign_id, group_id, group_name, target_type) VALUES ?",
-        [targets.map((target) => [campaignId, target.target_id, target.target_name, targetType])]
-      );
+      if (targets.length) {
+        await pool.query(
+          "INSERT INTO zalo_campaign_targets (campaign_id, group_id, group_name, target_type) VALUES ?",
+          [targets.map((target) => [campaignId, target.target_id, target.target_name, targetType])]
+        );
+      }
 
       await logActivity(req.user.id, req, {
         subject: "Chiến dịch Zalo",
