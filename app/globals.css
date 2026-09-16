@@ -162,6 +162,7 @@ button {
   min-height: 100vh;
   background: radial-gradient(circle at 88% 92%, rgba(224, 36, 36, 0.08), transparent 34%), var(--bg);
   font-family: var(--font-ui) !important;
+  overflow-x: clip;
 }
 
 .sidebar {
@@ -738,6 +739,7 @@ button {
   padding: 24px;
   min-height: calc(100vh - 64px);
   transition: margin-left 0.22s ease;
+  min-width: 0;
 }
 
 .sidebar-collapsed .main {
@@ -747,6 +749,7 @@ button {
 .page {
   max-width: 1650px;
   margin: 0 auto;
+  min-width: 0;
 }
 
 .row {
@@ -871,6 +874,10 @@ button {
   font-size: 13px;
   font-weight: 800;
   padding: 12px 14px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .form-message.error {
@@ -2744,10 +2751,34 @@ button {
   text-align: center;
 }
 
+.campaign-panel-head {
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.campaign-panel-head > div:first-child {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.campaign-panel-head .subtitle {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .campaign-list {
   display: grid;
   gap: 14px;
   padding: 16px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .campaign-card {
@@ -2757,10 +2788,47 @@ button {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--card);
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  box-sizing: border-box;
 }
 
 .campaign-card h3 {
   margin: 0 0 4px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.campaign-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.campaign-card-info {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+.campaign-card-info p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+  line-height: 1.55;
+}
+
+.campaign-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex-shrink: 0;
 }
 
 .campaign-message-preview {
@@ -2770,12 +2838,26 @@ button {
   color: var(--text);
   line-height: 1.55;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.campaign-last-error {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+  max-height: 180px;
+  overflow-y: auto;
+  line-height: 1.5;
+  font-family: inherit;
+  font-size: 13px;
 }
 
 .campaign-progress-row {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 
 .campaign-progress-row span {
@@ -2785,6 +2867,7 @@ button {
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
+  white-space: nowrap;
 }
 
 .campaign-target-list {
@@ -2792,6 +2875,7 @@ button {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin-top: 10px;
+  min-width: 0;
 }
 
 .campaign-target {
@@ -2802,12 +2886,24 @@ button {
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
+  min-width: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.campaign-target strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .campaign-target small {
   min-width: 0;
   color: var(--muted);
   overflow-wrap: anywhere;
+  word-break: break-word;
   white-space: normal;
 }
 

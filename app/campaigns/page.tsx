@@ -890,14 +890,14 @@ export default function CampaignsPage() {
                 const isRecurringCampaign = campaign.schedule_type === "daily" || campaign.schedule_type === "custom";
                 return (
                 <article className="campaign-card" key={campaign.id}>
-                  <div className="between">
-                    <div>
+                  <div className="between campaign-card-head">
+                    <div className="campaign-card-info">
                       <h3>{campaign.name}</h3>
                       <p className="muted">
                         {campaign.account_name || campaign.own_id} · {campaign.target_type === "friend" ? "Bạn bè" : campaign.target_type === "member" ? "Thành viên" : "Nhóm"} · {campaignScheduleText(campaign)}
                       </p>
                     </div>
-                    <div className="row" style={{ justifyContent: "flex-end" }}>
+                    <div className="row campaign-card-actions" style={{ justifyContent: "flex-end" }}>
                       <span className={`status ${statusTone(campaign.status)}`}>{statusText(campaign.status)}</span>
                       {["paused", "cancelled", "failed"].includes(campaign.status) ? (
                         <button
@@ -927,7 +927,7 @@ export default function CampaignsPage() {
                     <span>{isRecurringCampaign ? "Tuỳ chỉnh" : "Một lần"}</span>
                     <span>Delay {campaign.delay_seconds} giây</span>
                   </div>
-                  {campaign.last_error ? <div className="form-message error">{campaign.last_error}</div> : null}
+                  {campaign.last_error ? <div className="form-message error campaign-last-error">{campaign.last_error}</div> : null}
                   <details open={campaign.targets.length > 0}>
                     <summary>Chi tiết mục tiêu</summary>
                     {visibleCampaignTargets.length ? (
@@ -958,7 +958,7 @@ export default function CampaignsPage() {
                     ) : null}
                   </details>
                   {["scheduled", "running", "paused", "cancelled", "failed"].includes(campaign.status) ? (
-                    <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
+                    <div className="row campaign-card-actions" style={{ justifyContent: "flex-end", marginTop: 12 }}>
                       {["paused", "cancelled", "failed"].includes(campaign.status) ? (
                         <button className="btn btn-primary" onClick={() => handleResumeCampaign(campaign)} type="button">
                           <Icon name="play" size={16} /> Tiếp tục gửi
