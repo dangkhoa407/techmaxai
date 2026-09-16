@@ -9698,7 +9698,20 @@ async function processZaloCampaign(campaignId) {
     }
 
     if (isRecurringCampaign) {
-      await exec("UPDATE zalo_campaign_targets SET status = 'pending', sent_at = NULL, error_message = NULL, raw_json = NULL WHERE campaign_id = ?", [campaign.id]);
+      const [pendingCheck] = await query(
+        "SELECT COUNT(*) AS pending_count, SUM(status = 'sent') AS sent_count FROM zalo_campaign_targets WHERE campaign_id = ?",
+        [campaign.id]
+      );
+      const pendingCount = Number(pendingCheck?.pending_count || 0);
+      const sentCount = Number(pendingCheck?.sent_count || 0);
+
+      // Nếu đang có mục tiêu pending (đang gửi dở hoặc vừa bấm 'Tiếp tục gửi'),
+      // TUYỆT ĐỐI KHÔNG reset các mục tiêu đã gửi! Tiếp tục gửi các mục tiêu pending.
+      // Chỉ khi toàn bộ mục tiêu của chu kỳ trước đã xong (pendingCount === 0 && sentCount > 0), mới reset cho chu kỳ mới.
+      if (pendingCount === 0 && sentCount > 0) {
+        await exec("UPDATE zalo_campaign_targets SET status = 'pending', sent_at = NULL, error_message = NULL, raw_json = NULL WHERE campaign_id = ?", [campaign.id]);
+        await exec("UPDATE zalo_campaigns SET sent_count = 0, failed_count = 0 WHERE id = ?", [campaign.id]);
+      }
     }
 
     const targets = await query(
