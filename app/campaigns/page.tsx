@@ -899,6 +899,16 @@ export default function CampaignsPage() {
                     </div>
                     <div className="row" style={{ justifyContent: "flex-end" }}>
                       <span className={`status ${statusTone(campaign.status)}`}>{statusText(campaign.status)}</span>
+                      {["paused", "cancelled", "failed"].includes(campaign.status) ? (
+                        <button
+                          className="btn btn-primary"
+                          onClick={() => handleResumeCampaign(campaign)}
+                          type="button"
+                          style={{ padding: "6px 12px", fontSize: 13 }}
+                        >
+                          <Icon name="play" size={15} /> Tiếp tục gửi
+                        </button>
+                      ) : null}
                       <button className="btn btn-secondary" onClick={() => handleDeleteCampaign(campaign)} type="button">
                         <Icon name="trash" size={16} /> Xoá lịch sử
                       </button>
@@ -947,20 +957,22 @@ export default function CampaignsPage() {
                       </div>
                     ) : null}
                   </details>
-                  {["scheduled", "running", "paused"].includes(campaign.status) ? (
-                    <div className="row" style={{ justifyContent: "flex-end" }}>
-                      {campaign.status === "paused" ? (
-                        <button className="btn btn-secondary" onClick={() => handleResumeCampaign(campaign)} type="button">
-                          <Icon name="play" size={16} /> Tiếp tục
+                  {["scheduled", "running", "paused", "cancelled", "failed"].includes(campaign.status) ? (
+                    <div className="row" style={{ justifyContent: "flex-end", marginTop: 12 }}>
+                      {["paused", "cancelled", "failed"].includes(campaign.status) ? (
+                        <button className="btn btn-primary" onClick={() => handleResumeCampaign(campaign)} type="button">
+                          <Icon name="play" size={16} /> Tiếp tục gửi
                         </button>
                       ) : (
                         <button className="btn btn-secondary" onClick={() => handlePauseCampaign(campaign)} type="button">
                           <Icon name="pause" size={16} /> Dừng
                         </button>
                       )}
-                      <button className="btn btn-secondary" onClick={() => handleCancelCampaign(campaign)} type="button">
-                        <Icon name="x" size={16} /> Hủy chiến dịch
-                      </button>
+                      {["scheduled", "running", "paused"].includes(campaign.status) ? (
+                        <button className="btn btn-secondary" onClick={() => handleCancelCampaign(campaign)} type="button">
+                          <Icon name="x" size={16} /> Hủy chiến dịch
+                        </button>
+                      ) : null}
                     </div>
                   ) : null}
                 </article>

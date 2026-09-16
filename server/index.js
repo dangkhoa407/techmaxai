@@ -15816,16 +15816,37 @@ route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
       const campaignId = Number(req.body.id || 0);
       const campaign = (await query("SELECT id, user_id, zalo_account_id, name, status FROM zalo_campaigns WHERE id = ? AND user_id = ? LIMIT 1", [campaignId, req.user.id]))[0];
       if (!campaign) return jsonError(res, 404, "Không tìm thấy chiến dịch.");
-      if (campaign.status !== "paused") {
-        return jsonError(res, 422, "Chỉ có thể tiếp tục chiến dịch đang tạm dừng.");
+      if (!["paused", "cancelled", "failed"].includes(campaign.status)) {
+        return jsonError(res, 422, "Chỉ có thể tiếp tục chiến dịch đang tạm dừng, bị hủy hoặc thất bại.");
       }
       const accountConnection = await getZaloAccountConnectionState(req.user.id, campaign.zalo_account_id);
       if (!accountConnection.ok) {
         return jsonError(res, 422, accountConnection.message || "Tài khoản Zalo đã mất kết nối. Vui lòng đăng nhập lại bằng QR.");
       }
+
       await exec(
-        "UPDATE zalo_campaigns SET status = 'scheduled', next_run_at = NOW(), finished_at = NULL WHERE id = ? AND user_id = ?",
-        [campaignId, req.user.id]
+        "UPDATE zalo_campaign_targets SET status = 'pending', error_message = NULL, raw_json = NULL WHERE campaign_id = ? AND status IN ('cancelled', 'pending')",
+        [campaignId]
+      );
+      const [remainingPending] = await query("SELECT COUNT(*) AS count FROM zalo_campaign_targets WHERE campaign_id = ? AND status = 'pending'", [campaignId]);
+      if (Number(remainingPending?.count || 0) === 0) {
+        await exec(
+          "UPDATE zalo_campaign_targets SET status = 'pending', error_message = NULL, raw_json = NULL WHERE campaign_id = ? AND status <> 'sent'",
+          [campaignId]
+        );
+      }
+
+      const [counts] = await query(
+        `SELECT
+           SUM(status = 'sent') AS sent,
+           SUM(status = 'failed') AS failed
+         FROM zalo_campaign_targets WHERE campaign_id = ?`,
+        [campaignId]
+      );
+
+      await exec(
+        "UPDATE zalo_campaigns SET status = 'scheduled', next_run_at = NOW(), finished_at = NULL, last_error = NULL, sent_count = ?, failed_count = ? WHERE id = ? AND user_id = ?",
+        [Number(counts?.sent || 0), Number(counts?.failed || 0), campaignId, req.user.id]
       );
       await logActivity(req.user.id, req, {
         subject: "Chiến dịch Zalo",
