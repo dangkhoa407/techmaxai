@@ -12,8 +12,6 @@ const { spawn } = require("child_process");
 const { Server: SocketIOServer } = require("socket.io");
 const fs = require("fs");
 const path = require("path");
-const sharp = require("sharp");
-const ort = require("onnxruntime-node");
 require("dotenv").config({ path: ".env.local" });
 require("dotenv").config();
 
@@ -5841,11 +5839,37 @@ function stopAutoBotResumeWatcher() {
   }
 }
 
+let sharpLib = null;
+let ortLib = null;
+
+function getOrtLib() {
+  if (!ortLib) {
+    try {
+      ortLib = require("onnxruntime-node");
+    } catch (err) {
+      throw new Error(`Chưa cài đặt thư viện 'onnxruntime-node' trên server. Hãy chạy: npm install onnxruntime-node (${err.message})`);
+    }
+  }
+  return ortLib;
+}
+
+function getSharpLib() {
+  if (!sharpLib) {
+    try {
+      sharpLib = require("sharp");
+    } catch (err) {
+      throw new Error(`Chưa cài đặt thư viện 'sharp' trên server. Hãy chạy: npm install sharp (${err.message})`);
+    }
+  }
+  return sharpLib;
+}
+
 async function getMbCaptchaSession() {
   if (mbBankCaptchaSession) return mbBankCaptchaSession;
   if (!fs.existsSync(MB_CAPTCHA_MODEL_PATH)) {
     throw new Error(`Không tìm thấy file model captcha MB tại ${MB_CAPTCHA_MODEL_PATH}.`);
   }
+  const ort = getOrtLib();
   if (!mbBankCaptchaSessionPromise) {
     mbBankCaptchaSessionPromise = ort.InferenceSession.create(MB_CAPTCHA_MODEL_PATH)
       .then((session) => {
@@ -5860,6 +5884,8 @@ async function getMbCaptchaSession() {
 }
 
 async function recognizeMbCaptchaBuffer(imageBuffer) {
+  const ort = getOrtLib();
+  const sharp = getSharpLib();
   const session = await getMbCaptchaSession();
 
   const raw = await sharp(imageBuffer)
