@@ -341,7 +341,17 @@ function LogoText({ compact = false }: { compact?: boolean }) {
   );
 }
 
-export function Sidebar({ active, collapsed }: { active: string; collapsed: boolean }) {
+export function Sidebar({
+  active,
+  collapsed,
+  mobileOpen = false,
+  onCloseMobile
+}: {
+  active: string;
+  collapsed: boolean;
+  mobileOpen?: boolean;
+  onCloseMobile?: () => void;
+}) {
   const { user } = useAuthUser();
   const isAdmin = user?.level === "admin";
 
@@ -355,11 +365,27 @@ export function Sidebar({ active, collapsed }: { active: string; collapsed: bool
     });
   }
 
+  const sidebarClass = [
+    "sidebar",
+    collapsed ? "collapsed" : "",
+    mobileOpen ? "mobile-open" : ""
+  ].filter(Boolean).join(" ");
+
   return (
-    <aside className={collapsed ? "sidebar collapsed" : "sidebar"}>
-      <Link className="brand" href="/dashboard">
-        <LogoText compact={collapsed} />
-      </Link>
+    <aside className={sidebarClass}>
+      <div className="sidebar-brand-row">
+        <Link className="brand" href="/dashboard" onClick={onCloseMobile}>
+          <LogoText compact={collapsed} />
+        </Link>
+        <button
+          className="sidebar-mobile-close"
+          onClick={onCloseMobile}
+          type="button"
+          aria-label="Đóng menu"
+        >
+          <Icon name="x" size={20} />
+        </button>
+      </div>
       <nav>
         {displayedGroups.map((group) => (
           <div key={group.label}>
@@ -369,6 +395,7 @@ export function Sidebar({ active, collapsed }: { active: string; collapsed: bool
                 className={`nav-link ${active === href ? "active" : ""}`}
                 href={href}
                 key={`${group.label}-${label}`}
+                onClick={onCloseMobile}
               >
                 <NavIcon name={icon} />
                 <span>{label}</span>
@@ -381,7 +408,17 @@ export function Sidebar({ active, collapsed }: { active: string; collapsed: bool
   );
 }
 
-export function Topbar({ title, collapsed, onToggleSidebar }: { title: React.ReactNode; collapsed: boolean; onToggleSidebar: () => void }) {
+export function Topbar({
+  title,
+  collapsed,
+  onToggleSidebar,
+  onToggleMobileSidebar
+}: {
+  title: React.ReactNode;
+  collapsed: boolean;
+  onToggleSidebar: () => void;
+  onToggleMobileSidebar?: () => void;
+}) {
   const pathname = usePathname();
   const router = useRouter();
   const { user } = useAuthUser();
@@ -524,9 +561,19 @@ export function Topbar({ title, collapsed, onToggleSidebar }: { title: React.Rea
         </button>
         <span className="muted">/ {title}</span>
       </div>
-      <Link className="mobile-top-logo" href="/dashboard" aria-label="TechMax">
-        <LogoText compact />
-      </Link>
+      <div className="mobile-header-left">
+        <button
+          className="mobile-sidebar-toggle"
+          onClick={onToggleMobileSidebar}
+          aria-label="Mở menu"
+          type="button"
+        >
+          <Icon name="menu_open" size={22} />
+        </button>
+        <Link className="mobile-top-logo" href="/dashboard" aria-label="TechMax">
+          <LogoText compact />
+        </Link>
+      </div>
       <div className="row">
         <div className="chip">
           <Icon name="account_balance_wallet" size={16} />
@@ -644,13 +691,42 @@ export function AppFrame({
   children: React.ReactNode;
 }) {
   const router = useRouter();
+  const pathname = usePathname();
   const { loading } = useAuthUser();
   const [mounted, setMounted] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  useEffect(() => {
+    setMobileSidebarOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (mobileSidebarOpen) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [mobileSidebarOpen]);
+
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        setMobileSidebarOpen(false);
+      }
+    }
+    if (mobileSidebarOpen) {
+      window.addEventListener("keydown", onKeyDown);
+      return () => window.removeEventListener("keydown", onKeyDown);
+    }
+  }, [mobileSidebarOpen]);
 
   useEffect(() => {
     if (!mounted || loading) return;
@@ -666,8 +742,23 @@ export function AppFrame({
 
   return (
     <div className={sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}>
-      <Sidebar active={active} collapsed={sidebarCollapsed} />
-      <Topbar title={title} collapsed={sidebarCollapsed} onToggleSidebar={() => setSidebarCollapsed((value) => !value)} />
+      <div
+        className={`sidebar-backdrop ${mobileSidebarOpen ? "open" : ""}`}
+        onClick={() => setMobileSidebarOpen(false)}
+        aria-hidden="true"
+      />
+      <Sidebar
+        active={active}
+        collapsed={sidebarCollapsed}
+        mobileOpen={mobileSidebarOpen}
+        onCloseMobile={() => setMobileSidebarOpen(false)}
+      />
+      <Topbar
+        title={title}
+        collapsed={sidebarCollapsed}
+        onToggleSidebar={() => setSidebarCollapsed((value) => !value)}
+        onToggleMobileSidebar={() => setMobileSidebarOpen((value) => !value)}
+      />
       <main className="main">
         <div className="page">{children}</div>
       </main>
