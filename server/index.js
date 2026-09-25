@@ -255,6 +255,20 @@ process.on("uncaughtException", (error) => {
 const APP_TIME_ZONE = "Asia/Ho_Chi_Minh";
 
 function nowSql(date = new Date()) {
+  let d = date;
+  if (!(d instanceof Date)) {
+    if (typeof d === "string") {
+      const trimmed = d.trim();
+      d = new Date(trimmed.includes("T") ? trimmed : trimmed.replace(" ", "T"));
+    } else if (typeof d === "number") {
+      d = new Date(d);
+    } else {
+      d = new Date();
+    }
+  }
+  if (!d || Number.isNaN(d.getTime())) {
+    d = new Date();
+  }
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: APP_TIME_ZONE,
     year: "numeric",
@@ -264,7 +278,7 @@ function nowSql(date = new Date()) {
     minute: "2-digit",
     second: "2-digit",
     hour12: false,
-  }).formatToParts(date).reduce((acc, part) => {
+  }).formatToParts(d).reduce((acc, part) => {
     if (part.type !== "literal") acc[part.type] = part.value;
     return acc;
   }, {});
@@ -2890,6 +2904,20 @@ function appDateFromDateAndTime(dateText, timeText) {
 }
 
 function getVnDateParts(date = new Date()) {
+  let d = date;
+  if (!(d instanceof Date)) {
+    if (typeof d === "string") {
+      const trimmed = d.trim();
+      d = new Date(trimmed.includes("T") ? trimmed : trimmed.replace(" ", "T"));
+    } else if (typeof d === "number") {
+      d = new Date(d);
+    } else {
+      d = new Date();
+    }
+  }
+  if (!d || Number.isNaN(d.getTime())) {
+    d = new Date();
+  }
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: APP_TIME_ZONE,
     year: "numeric",
@@ -2899,7 +2927,7 @@ function getVnDateParts(date = new Date()) {
     minute: "2-digit",
     second: "2-digit",
     hour12: false,
-  }).formatToParts(date).reduce((acc, part) => {
+  }).formatToParts(d).reduce((acc, part) => {
     if (part.type !== "literal") acc[part.type] = part.value;
     return acc;
   }, {});
@@ -9784,8 +9812,13 @@ async function zaloCampaignRows(userId) {
     try {
       campaigns.push(publicZaloCampaign(row, targetMap.get(Number(row.id)) || []));
     } catch (error) {
+      console.error("[zalo campaign public row error]", { campaignId: row.id, error });
       writeLog("[zalo campaign public row error]", { campaignId: row.id, error });
-      campaigns.push(fallbackPublicZaloCampaign(row, targetMap.get(Number(row.id)) || []));
+      try {
+        campaigns.push(fallbackPublicZaloCampaign(row, targetMap.get(Number(row.id)) || []));
+      } catch (fallbackError) {
+        console.error("[zalo campaign fallback row error]", { campaignId: row.id, error: fallbackError });
+      }
     }
   }
   return campaigns;
@@ -15877,6 +15910,16 @@ route(["/api/campaigns"], "get", [requireUser, async (req, res, next) => {
 
 route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
   try {
+    const safeCampaignRows = async () => {
+      try {
+        return await zaloCampaignRows(req.user.id);
+      } catch (error) {
+        console.error("[campaigns response rows error]", error);
+        writeLog("[campaigns response rows error]", error);
+        return await fallbackZaloCampaignRows(req.user.id).catch(() => []);
+      }
+    };
+
     const action =
       cleanString(req.body.action) ||
       cleanString(req.body.type) ||
@@ -16230,7 +16273,7 @@ route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
         detail: `Đã hủy chiến dịch Zalo #${campaignId}.`,
         tone: "orange",
       });
-      return res.json({ success: true, message: "Đã hủy chiến dịch.", campaigns: await zaloCampaignRows(req.user.id) });
+      return res.json({ success: true, message: "Đã hủy chiến dịch.", campaigns: await safeCampaignRows() });
     }
 
     if (action === "pause_campaign") {
@@ -16249,7 +16292,7 @@ route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
         detail: `Đã dừng chiến dịch Zalo #${campaignId}.`,
         tone: "orange",
       });
-      return res.json({ success: true, message: "Đã dừng chiến dịch.", campaigns: await zaloCampaignRows(req.user.id) });
+      return res.json({ success: true, message: "Đã dừng chiến dịch.", campaigns: await safeCampaignRows() });
     }
 
     if (action === "resume_campaign") {
@@ -16292,8 +16335,14 @@ route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
       // Nếu là chiến dịch định kỳ và không còn mục tiêu dở dang nào (toàn bộ đợt trước đã gửi xong),
       // thì mốc gửi tiếp theo phải ở TƯƠNG LAI theo lịch!
       if (isRecurring && pendingCount === 0) {
-        const futureNextRun = nextCampaignRun(nowSql(), campaign.days_of_week_json, new Date(Date.now() + 1000), campaign.scheduled_times_json);
-        nextRunSql = nowSql(futureNextRun);
+        try {
+          const futureNextRun = nextCampaignRun(nowSql(), campaign.days_of_week_json, new Date(Date.now() + 1000), campaign.scheduled_times_json);
+          if (futureNextRun) {
+            nextRunSql = nowSql(futureNextRun);
+          }
+        } catch (calcError) {
+          console.error("[resume next run calc error]", calcError);
+        }
       }
 
       await exec(
@@ -16307,8 +16356,8 @@ route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
         detail: `Đã tiếp tục chiến dịch Zalo #${campaignId}.`,
         tone: "blue",
       });
-      pollZaloCampaigns().catch((error) => writeLog("[zalo campaign resume poll error]", error));
-      return res.json({ success: true, message: "Đã tiếp tục chiến dịch.", campaigns: await zaloCampaignRows(req.user.id) });
+      pollZaloCampaigns().catch((error) => console.error("[zalo campaign resume poll error]", error));
+      return res.json({ success: true, message: "Đã tiếp tục chiến dịch.", campaigns: await safeCampaignRows() });
     }
 
     if (action === "delete_campaign") {
@@ -16328,7 +16377,7 @@ route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
         detail: `Đã xóa lịch sử chiến dịch Zalo #${campaignId}.`,
         tone: "red",
       });
-      return res.json({ success: true, message: "Đã xóa lịch sử chiến dịch.", campaigns: await zaloCampaignRows(req.user.id) });
+      return res.json({ success: true, message: "Đã xóa lịch sử chiến dịch.", campaigns: await safeCampaignRows() });
     }
 
     if (action === "clear_campaign_history") {
@@ -16351,14 +16400,6 @@ route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
     }
 
     if (action === "cancel_running_campaigns") {
-      const safeCampaignRows = async () => {
-        try {
-          return await zaloCampaignRows(req.user.id);
-        } catch (error) {
-          writeLog("[campaign cancel running rows response error]", error);
-          return [];
-        }
-      };
       const campaigns = await query(
         "SELECT id FROM zalo_campaigns WHERE user_id = ? AND status IN ('scheduled', 'running', 'paused')",
         [req.user.id]
@@ -16381,15 +16422,15 @@ route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
         target: "Chiến dịch Zalo",
         detail: `Đã hủy ${ids.length} chiến dịch Zalo đang chạy hoặc đang chờ.`,
         tone: "orange",
-      }).catch((error) => writeLog("[campaign cancel running activity log error]", error));
+      });
       return res.json({ success: true, message: `Đã hủy ${ids.length} chiến dịch đang chạy hoặc đang chờ.`, campaigns: await safeCampaignRows() });
     }
 
     return jsonError(res, 422, "Action không hợp lệ.");
   } catch (error) {
+    console.error("[campaigns post error]", error);
     writeLog("[campaigns post error]", error);
-    if (error.status) return jsonError(res, error.status, error.message);
-    next(error);
+    return jsonError(res, error.statusCode || error.status || 500, error.message || "Có lỗi xảy ra khi xử lý chiến dịch.");
   }
 }]);
 
