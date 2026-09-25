@@ -7,3 +7,10 @@ dist
 *.log
 server/*.log
 uploads/
+*.mp4
+*.webm
+*.mp3
+*.wav
+render_tvc/
+TechMax_TVC_Ads.mp4
+
