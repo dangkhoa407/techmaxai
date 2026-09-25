@@ -2726,16 +2726,17 @@ function zaloRuntimeStatus(row) {
     return { online: false, listenerOnline: false, status: "inactive", text: "Tạm dừng" };
   }
   const runtime = findZaloRuntimeAccount(row);
-  const runtimeStatus = String(runtime?.runtimeStatus || (runtime?.api ? "online" : "offline"));
-  const online = Boolean(runtime?.api) && !["offline", "closed", "error"].includes(runtimeStatus);
-  if (online) {
+  if (runtime?.api) {
+    const runtimeStatus = String(runtime.runtimeStatus || "online");
+    const isConnecting = runtimeStatus === "connecting" || runtimeStatus === "closed";
     return {
       online: true,
-      listenerOnline: Boolean(runtime.listenerStarted),
-      status: runtimeStatus === "connecting" ? "connecting" : "online",
-      text: runtimeStatus === "connecting" ? "Đang kết nối" : "Online",
+      listenerOnline: Boolean(runtime.listenerStarted) && !isConnecting && runtimeStatus !== "error",
+      status: isConnecting ? "connecting" : "online",
+      text: isConnecting ? "Đang kết nối" : "Online",
     };
   }
+  const runtimeStatus = String(runtime?.runtimeStatus || "offline");
   if (runtimeStatus === "error") {
     return { online: false, listenerOnline: false, status: "error", text: runtime?.lastRuntimeError || "Đăng nhập thất bại" };
   }
@@ -2945,14 +2946,19 @@ function parseCampaignScheduledDate(value, fallback = new Date()) {
 }
 
 function nextCampaignRun(baseValue, daysOfWeek, fromDate = new Date(), scheduledTimes = null) {
-  const base = parseCampaignScheduledDate(baseValue || fromDate, fromDate);
+  const now = new Date();
+  const from = new Date(fromDate);
+  // Luôn đảm bảo mốc thời gian bắt đầu quét tối thiểu là thời điểm hiện tại (tương lai)
+  const effectiveFrom = from.getTime() < now.getTime() ? now : from;
+  const fromTime = effectiveFrom.getTime();
+
+  const base = parseCampaignScheduledDate(baseValue || effectiveFrom, effectiveFrom);
   const selectedDays = normalizeCampaignWeekdays(daysOfWeek);
   const days = selectedDays.length ? selectedDays : [0, 1, 2, 3, 4, 5, 6];
   const times = normalizeCampaignTimes(scheduledTimes, base);
-  const from = new Date(fromDate);
-  const fromTime = from.getTime();
-  for (let offset = 0; offset <= 14; offset += 1) {
-    const dateText = getVnDateTextWithOffset(from, offset);
+
+  for (let offset = 0; offset <= 30; offset += 1) {
+    const dateText = getVnDateTextWithOffset(effectiveFrom, offset);
     const dayOfWeek = getVnDayOfWeek(dateText);
     if (!days.includes(dayOfWeek)) continue;
     for (const time of times) {
@@ -2961,14 +2967,16 @@ function nextCampaignRun(baseValue, daysOfWeek, fromDate = new Date(), scheduled
       return candidate;
     }
   }
-  return addDays(from, 1);
+  return addDays(effectiveFrom, 1);
 }
 
 function nextOneTimeCampaignRun(baseValue, scheduledTimes, fromDate = new Date(), scheduledDateTimes = null) {
+  const now = new Date();
   const from = new Date(fromDate);
-  const fromTime = from.getTime();
+  const fromTime = Math.max(from.getTime(), now.getTime());
+
   if (scheduledDateTimes) {
-    const base = parseCampaignScheduledDate(baseValue || fromDate, fromDate);
+    const base = parseCampaignScheduledDate(baseValue || from, from);
     const dateTimes = normalizeCampaignDateTimes(scheduledDateTimes, base);
     for (const dateTime of dateTimes) {
       const candidate = appDateFromDateAndTime(dateTime.slice(0, 10), dateTime.slice(11, 16));
@@ -2976,7 +2984,7 @@ function nextOneTimeCampaignRun(baseValue, scheduledTimes, fromDate = new Date()
     }
     return null;
   }
-  const base = parseCampaignScheduledDate(baseValue || fromDate, fromDate);
+  const base = parseCampaignScheduledDate(baseValue || from, from);
   const dateText = getVnDateTextWithOffset(base, 0);
   const times = normalizeCampaignTimes(scheduledTimes, base);
   for (const time of times) {
@@ -2994,6 +3002,21 @@ function publicZaloCampaign(row, targets = []) {
       return null;
     }
   })();
+  const isRecurring = row.schedule_type === "daily" || row.schedule_type === "custom";
+  let nextRunAt = row.next_run_at || null;
+  // Đảm bảo thời gian gửi lần tiếp theo luôn ở tương lai:
+  // Nếu là chiến dịch định kỳ và next_run_at trong DB đang ở quá khứ (do bị lỗi dừng từ trước),
+  // tự động tính lại mốc kế tiếp luôn ở TƯƠNG LAI để hiển thị và lưu lại
+  if (isRecurring && nextRunAt) {
+    const nextRunTime = new Date(String(nextRunAt).replace(" ", "T")).getTime();
+    if (!Number.isNaN(nextRunTime) && nextRunTime <= Date.now()) {
+      const futureNext = nextCampaignRun(nowSql(), row.days_of_week_json, new Date(Date.now() + 1000), row.scheduled_times_json);
+      if (futureNext) {
+        nextRunAt = nowSql(futureNext);
+        exec("UPDATE zalo_campaigns SET next_run_at = ? WHERE id = ? AND next_run_at = ?", [nextRunAt, row.id, row.next_run_at]).catch(() => {});
+      }
+    }
+  }
   return {
     id: Number(row.id),
     zalo_account_id: Number(row.zalo_account_id),
@@ -3003,7 +3026,7 @@ function publicZaloCampaign(row, targets = []) {
     message: row.message,
     image,
     scheduled_at: row.scheduled_at,
-    next_run_at: row.next_run_at || null,
+    next_run_at: nextRunAt,
     last_run_at: row.last_run_at || null,
     schedule_type: row.schedule_type || "once",
     days_of_week: normalizeCampaignWeekdays(row.days_of_week_json),
@@ -3040,6 +3063,15 @@ function publicZaloCampaign(row, targets = []) {
 }
 
 function fallbackPublicZaloCampaign(row, targets = []) {
+  const isRecurring = row.schedule_type === "daily" || row.schedule_type === "custom";
+  let nextRunAt = row.next_run_at || null;
+  if (isRecurring && nextRunAt) {
+    const nextRunTime = new Date(String(nextRunAt).replace(" ", "T")).getTime();
+    if (!Number.isNaN(nextRunTime) && nextRunTime <= Date.now()) {
+      const futureNext = nextCampaignRun(nowSql(), row.days_of_week_json, new Date(Date.now() + 1000), row.scheduled_times_json);
+      if (futureNext) nextRunAt = nowSql(futureNext);
+    }
+  }
   return {
     id: Number(row.id),
     zalo_account_id: Number(row.zalo_account_id || 0),
@@ -3049,7 +3081,7 @@ function fallbackPublicZaloCampaign(row, targets = []) {
     message: row.message || "",
     image: null,
     scheduled_at: row.scheduled_at || null,
-    next_run_at: row.next_run_at || null,
+    next_run_at: nextRunAt,
     last_run_at: row.last_run_at || null,
     schedule_type: row.schedule_type || "once",
     days_of_week: normalizeCampaignWeekdays(row.days_of_week_json),
@@ -9036,7 +9068,7 @@ async function getZaloAccountConnectionState(userId, accountId) {
   let account = findZaloRuntimeAccount(row);
   if (!account?.api) account = await restoreZaloRuntimeAccountFromCredential(row.own_id).catch(() => null);
   const runtime = zaloRuntimeStatus(row);
-  if (!account?.api || !runtime.online) {
+  if (!account?.api) {
     return { ok: false, row, account, runtime, message: "Tài khoản Zalo đã mất kết nối. Vui lòng đăng nhập lại bằng QR." };
   }
   return { ok: true, row, account, runtime };
@@ -9875,8 +9907,15 @@ async function cancelZaloCampaignForDisconnectedAccount(campaign, message = "Tà
 }
 
 async function ensureZaloCampaignAccountConnected(campaign) {
-  const state = await getZaloAccountConnectionState(campaign.user_id, campaign.zalo_account_id);
+  let state = await getZaloAccountConnectionState(campaign.user_id, campaign.zalo_account_id);
   if (state.ok) return state;
+  // Thử khôi phục từ credential phòng trường hợp phiên vừa được khởi động lại
+  const rows = await query("SELECT own_id FROM zalo_accounts WHERE id = ? AND user_id = ? LIMIT 1", [campaign.zalo_account_id, campaign.user_id]);
+  if (rows[0]?.own_id) {
+    await restoreZaloRuntimeAccountFromCredential(rows[0].own_id).catch(() => null);
+    state = await getZaloAccountConnectionState(campaign.user_id, campaign.zalo_account_id);
+    if (state.ok) return state;
+  }
   const message = state.message || "Tài khoản Zalo đã mất kết nối. Chiến dịch đã được hủy.";
   await cancelZaloCampaignForDisconnectedAccount(campaign, message);
   return { ...state, ok: false, message };
@@ -9887,10 +9926,6 @@ async function waitZaloCampaignDelay(campaignId, delayMs, job = null, campaign =
   while (Date.now() < deadline) {
     const stopReason = await stopReasonForZaloCampaign(campaignId);
     if (stopReason) return false;
-    if (campaign) {
-      const connection = await ensureZaloCampaignAccountConnected(campaign);
-      if (!connection.ok) return false;
-    }
     await new Promise((resolve) => {
       const activeJob = job || getZaloCampaignJob(campaignId);
       if (activeJob?.cancelled) {
@@ -10047,10 +10082,14 @@ async function processZaloCampaign(campaignId) {
       } catch (error) {
         const message = extractZaloApiErrorMessage(error);
         if (job.cancelled || await stopReasonForZaloCampaign(campaign.id)) return;
-        const connectionAfterError = await getZaloAccountConnectionState(campaign.user_id, campaign.zalo_account_id);
-        if (!connectionAfterError.ok) {
-          await cancelZaloCampaignForDisconnectedAccount(campaign, connectionAfterError.message || message);
-          return;
+        // Chỉ hủy chiến dịch nếu lỗi thực sự là do phiên Zalo hết hạn hoặc tài khoản bị mất kết nối thực sự
+        const isAuthOrSessionError = /session|unauthorized|cookie|token|auth|đăng nhập/i.test(message) || error?.code === -1 || error?.code === 401;
+        if (isAuthOrSessionError) {
+          const connectionAfterError = await getZaloAccountConnectionState(campaign.user_id, campaign.zalo_account_id);
+          if (!connectionAfterError.ok) {
+            await cancelZaloCampaignForDisconnectedAccount(campaign, connectionAfterError.message || message);
+            return;
+          }
         }
         const targetType = target.target_type || campaign.target_type || "group";
         const targetMessage = formatZaloCampaignTargetError(targetType, target.group_id, error);
@@ -10086,9 +10125,9 @@ async function processZaloCampaign(campaignId) {
     const sent = Number(counts?.sent || 0);
     const failed = Number(counts?.failed || 0);
     const nextRun = isRecurringCampaign
-      ? nextCampaignRun(campaign.scheduled_at || nowSql(), campaign.days_of_week_json, new Date(Date.now() + 1000), campaign.scheduled_times_json)
-      : nextOneTimeCampaignRun(campaign.scheduled_at || nowSql(), campaign.scheduled_times_json, new Date(Date.now() + 1000), campaign.scheduled_datetimes_json);
-    if (nextRun) {
+      ? nextCampaignRun(nowSql(), campaign.days_of_week_json, new Date(Date.now() + 1000), campaign.scheduled_times_json)
+      : nextOneTimeCampaignRun(nowSql(), campaign.scheduled_times_json, new Date(Date.now() + 1000), campaign.scheduled_datetimes_json);
+    if (nextRun && nextRun.getTime() > Date.now()) {
       await exec("UPDATE zalo_campaign_targets SET status = 'pending', sent_at = NULL, error_message = NULL, raw_json = NULL WHERE campaign_id = ?", [campaign.id]);
       await exec(
         `UPDATE zalo_campaigns
@@ -12026,9 +12065,6 @@ function scheduleZaloAutoReconnect(account, attempt) {
   const timer = setTimeout(async () => {
     zaloReconnectTimers.delete(key);
     try {
-      // Xóa account cũ khỏi runtime để có thể restore lại
-      const idx = zaloAccounts.findIndex((a) => a.ownId === account.ownId && a.userId === account.userId);
-      if (idx !== -1) zaloAccounts.splice(idx, 1);
       account.listenerStarted = false;
 
       const restored = await restoreZaloRuntimeAccountFromCredential(account.ownId);
@@ -16133,11 +16169,12 @@ route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
 
       const clientTimeRaw = cleanString(req.body.client_time || req.body.clientTime || req.body.client_now);
       const clientNow = clientTimeRaw ? parseCampaignScheduledDate(clientTimeRaw, new Date()) : new Date();
+      const effectiveNow = clientNow.getTime() < Date.now() ? new Date() : clientNow;
       const nextRunAt = sendNow
         ? null
         : isRecurringSchedule
-          ? nextCampaignRun(scheduledDate, daysOfWeek, clientNow, scheduledTimes)
-          : nextOneTimeCampaignRun(scheduledDate, [], clientNow, scheduledDateTimes) || scheduledDate;
+          ? nextCampaignRun(scheduledDate, daysOfWeek, effectiveNow, scheduledTimes)
+          : nextOneTimeCampaignRun(scheduledDate, [], effectiveNow, scheduledDateTimes) || (scheduledDate.getTime() > Date.now() ? scheduledDate : new Date(Date.now() + 60000));
       const result = await exec(
         `INSERT INTO zalo_campaigns (user_id, zalo_account_id, name, message, image_json, scheduled_at, next_run_at, schedule_type, days_of_week_json, scheduled_times_json, scheduled_datetimes_json, target_type, send_mode, delay_seconds, total_groups)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -16217,7 +16254,7 @@ route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
 
     if (action === "resume_campaign") {
       const campaignId = Number(req.body.id || 0);
-      const campaign = (await query("SELECT id, user_id, zalo_account_id, name, status FROM zalo_campaigns WHERE id = ? AND user_id = ? LIMIT 1", [campaignId, req.user.id]))[0];
+      const campaign = (await query("SELECT * FROM zalo_campaigns WHERE id = ? AND user_id = ? LIMIT 1", [campaignId, req.user.id]))[0];
       if (!campaign) return jsonError(res, 404, "Không tìm thấy chiến dịch.");
       if (!["paused", "cancelled", "failed"].includes(campaign.status)) {
         return jsonError(res, 422, "Chỉ có thể tiếp tục chiến dịch đang tạm dừng, bị hủy hoặc thất bại.");
@@ -16242,14 +16279,26 @@ route(["/api/campaigns"], "post", [requireUser, async (req, res, next) => {
       const [counts] = await query(
         `SELECT
            SUM(status = 'sent') AS sent,
-           SUM(status = 'failed') AS failed
+           SUM(status = 'failed') AS failed,
+           SUM(status = 'pending') AS pending
          FROM zalo_campaign_targets WHERE campaign_id = ?`,
         [campaignId]
       );
 
+      const pendingCount = Number(counts?.pending || 0);
+      const isRecurring = campaign.schedule_type === "daily" || campaign.schedule_type === "custom";
+
+      let nextRunSql = nowSql();
+      // Nếu là chiến dịch định kỳ và không còn mục tiêu dở dang nào (toàn bộ đợt trước đã gửi xong),
+      // thì mốc gửi tiếp theo phải ở TƯƠNG LAI theo lịch!
+      if (isRecurring && pendingCount === 0) {
+        const futureNextRun = nextCampaignRun(nowSql(), campaign.days_of_week_json, new Date(Date.now() + 1000), campaign.scheduled_times_json);
+        nextRunSql = nowSql(futureNextRun);
+      }
+
       await exec(
-        "UPDATE zalo_campaigns SET status = 'scheduled', next_run_at = NOW(), finished_at = NULL, last_error = NULL, sent_count = ?, failed_count = ? WHERE id = ? AND user_id = ?",
-        [Number(counts?.sent || 0), Number(counts?.failed || 0), campaignId, req.user.id]
+        "UPDATE zalo_campaigns SET status = 'scheduled', next_run_at = ?, finished_at = NULL, last_error = NULL, sent_count = ?, failed_count = ? WHERE id = ? AND user_id = ?",
+        [nextRunSql, Number(counts?.sent || 0), Number(counts?.failed || 0), campaignId, req.user.id]
       );
       await logActivity(req.user.id, req, {
         subject: "Chiến dịch Zalo",

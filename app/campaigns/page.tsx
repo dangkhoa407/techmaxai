@@ -81,6 +81,10 @@ function campaignScheduleText(campaign: ZaloCampaign) {
       return `${parts}, đã hoàn tất${campaign.finished_at ? ` lúc ${formatDate(campaign.finished_at)}` : ""}`;
     }
     if (campaign.status === "scheduled" && campaign.next_run_at) {
+      const nextTime = new Date(campaign.next_run_at.replace(" ", "T")).getTime();
+      if (!Number.isNaN(nextTime) && nextTime <= Date.now()) {
+        return `${parts}, đang chờ gửi...`;
+      }
       return `${parts}, lần kế tiếp ${formatDate(campaign.next_run_at)}`;
     }
     return parts;
@@ -96,6 +100,10 @@ function campaignScheduleText(campaign: ZaloCampaign) {
     ? `mốc: ${campaign.scheduled_datetimes.map(formatDate).join(", ")}`
     : `gửi lúc ${formatDate(campaign.scheduled_at)}`;
   if (campaign.status === "scheduled" && campaign.next_run_at) {
+    const nextTime = new Date(campaign.next_run_at.replace(" ", "T")).getTime();
+    if (!Number.isNaN(nextTime) && nextTime <= Date.now()) {
+      return `${dates}, đang chờ gửi...`;
+    }
     return `${dates}, lần kế tiếp ${formatDate(campaign.next_run_at)}`;
   }
   return dates;
