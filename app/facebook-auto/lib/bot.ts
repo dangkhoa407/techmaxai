@@ -1,4 +1,4 @@
-﻿import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import path from "node:path";
 import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -135,12 +135,13 @@ const globalForBot = globalThis as typeof globalThis & {
   facebookAutoWorkerSemaphore?: { active: number; max: number; observedActive: number; queue: Array<() => void> };
   facebookAutoJobs?: Map<number, PersistedJob>;
   facebookAutoResumeBootstrapPromise?: Promise<void>;
+  facebookAutoResumeWatcherStarted?: boolean;
 };
 
 const accountContext = new AsyncLocalStorage<number>();
 const ownerContext = new AsyncLocalStorage<number>();
 const workerLogContext = new AsyncLocalStorage<WorkerLogContext>();
-const resumeCheckedOwners = new Set<number>();
+const resumingOwners = new Set<number>();
 let jobWriteQueue = Promise.resolve();
 let logWriteQueue = Promise.resolve();
 
@@ -4543,7 +4544,7 @@ export function validateConfig(raw: unknown): BotConfig {
 }
 export async function startBot(ownerId: number, config: BotConfig) {
   return ownerContext.run(ownerId, async () => {
-    resumeCheckedOwners.add(ownerId);
+    resumingOwners.delete(ownerId);
     const current = getState(ownerId);
     if (current.running) {
       throw new Error("Bot đang chạy.");
@@ -4687,9 +4688,32 @@ export async function getBotStatus(ownerId?: number): Promise<BotSnapshot> {
   return snapshot(ownerId);
 }
 
-export function bootstrapFacebookAutoResume() {
-  if (!globalForBot.facebookAutoResumeBootstrapPromise) {
-    globalForBot.facebookAutoResumeBootstrapPromise = (async () => {
+let inFlightFacebookBootstrapPromise: Promise<void> | null = null;
+
+export function startFacebookAutoBackgroundWatcher() {
+  if (globalForBot.facebookAutoResumeWatcherStarted) return;
+  globalForBot.facebookAutoResumeWatcherStarted = true;
+
+  const timer = setInterval(() => {
+    void bootstrapFacebookAutoResume().catch((err) => {
+      console.error("[facebook-auto background watcher error]:", err);
+    });
+  }, 20_000);
+
+  if (typeof timer.unref === "function") {
+    timer.unref();
+  }
+}
+
+export function bootstrapFacebookAutoResume(): Promise<void> {
+  startFacebookAutoBackgroundWatcher();
+
+  if (inFlightFacebookBootstrapPromise) {
+    return inFlightFacebookBootstrapPromise;
+  }
+
+  inFlightFacebookBootstrapPromise = (async () => {
+    try {
       const ownerIds = await readResumableJobOwnerIds();
       if (ownerIds.length === 0) {
         await syncObservedRunningJobs();
@@ -4705,29 +4729,47 @@ export function bootstrapFacebookAutoResume() {
         }
       }));
       await syncObservedRunningJobs();
-    })();
-  }
+    } catch (error) {
+      console.error("Lỗi trong quá trình bootstrap Auto Facebook resume:", error);
+    } finally {
+      inFlightFacebookBootstrapPromise = null;
+    }
+  })();
 
-  return globalForBot.facebookAutoResumeBootstrapPromise;
+  return inFlightFacebookBootstrapPromise;
 }
 
 async function ensureAutoResume(ownerId?: number) {
   const resolvedOwnerId = getOwnerId(ownerId);
-  if (resumeCheckedOwners.has(resolvedOwnerId)) return;
-  resumeCheckedOwners.add(resolvedOwnerId);
-  const saved = await readCurrentJob(resolvedOwnerId);
-  if (!saved) return;
+  const state = getState(resolvedOwnerId);
+  if (state.running) return;
+  if (resumingOwners.has(resolvedOwnerId)) return;
+  resumingOwners.add(resolvedOwnerId);
 
-  await ownerContext.run(resolvedOwnerId, async () => {
-    const config = saved.config;
-    const state = resetState(config, await syncWorkerSemaphoreRuntime());
-    getJobs().set(resolvedOwnerId, saved);
-    state.startedAt = saved.startedAt;
-    state.completedTasks = saved.completedByAccount.reduce((sum, count) => sum + count, 0);
-    state.currentPost = state.completedTasks;
-    state.progress = state.totalPosts > 0 ? Math.round((state.completedTasks / state.totalPosts) * 100) : 0;
-    state.paused = saved.status === "paused";
-    log(state, "warn", `Server đã khởi động lại. Tiếp tục từ tác vụ ${state.currentPost + 1}/${state.totalPosts}.`);
-    void runQueued(resolvedOwnerId, config, state, saved, state.runToken);
-  });
+  try {
+    const saved = await readCurrentJob(resolvedOwnerId);
+    if (!saved) return;
+    if (state.running) return;
+
+    await ownerContext.run(resolvedOwnerId, async () => {
+      const config = saved.config;
+      const initializedState = resetState(config, await syncWorkerSemaphoreRuntime());
+      getJobs().set(resolvedOwnerId, saved);
+      initializedState.startedAt = saved.startedAt;
+      initializedState.completedTasks = saved.completedByAccount.reduce((sum, count) => sum + count, 0);
+      initializedState.currentPost = initializedState.completedTasks;
+      initializedState.progress = initializedState.totalPosts > 0 ? Math.round((initializedState.completedTasks / initializedState.totalPosts) * 100) : 0;
+      initializedState.paused = saved.status === "paused";
+      log(initializedState, "warn", `Server hoặc tác vụ đã được khôi phục. Tiếp tục từ tác vụ ${initializedState.currentPost + 1}/${initializedState.totalPosts}.`);
+      void runQueued(resolvedOwnerId, config, initializedState, saved, initializedState.runToken);
+    });
+  } catch (error) {
+    console.error(`Lỗi khi khôi phục Auto Facebook cho owner ${resolvedOwnerId}:`, error);
+  } finally {
+    resumingOwners.delete(resolvedOwnerId);
+  }
 }
+
+// Auto-start background watcher when module is imported
+startFacebookAutoBackgroundWatcher();
+

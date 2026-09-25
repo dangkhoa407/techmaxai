@@ -60,9 +60,10 @@ const globalForThreads = globalThis as typeof globalThis & {
   threadsAutoStates?: Map<number, ThreadsAutoState>;
   threadsAutoListeners?: Map<number, Set<ThreadsAutoListener>>;
   threadsAutoJobs?: Map<number, PersistedThreadsJob>;
-  threadsAutoResumeCheckedOwners?: Set<number>;
   threadsAutoResumeBootstrapPromise?: Promise<void>;
+  threadsAutoResumeWatcherStarted?: boolean;
 };
+const resumingThreadsOwners = new Set<number>();
 let jobWriteQueue = Promise.resolve();
 
 function createInitialState(): ThreadsAutoState {
@@ -108,11 +109,6 @@ function normalizeState(state: ThreadsAutoState) {
 function getJobs() {
   globalForThreads.threadsAutoJobs ??= new Map();
   return globalForThreads.threadsAutoJobs;
-}
-
-function getResumeCheckedOwners() {
-  globalForThreads.threadsAutoResumeCheckedOwners ??= new Set();
-  return globalForThreads.threadsAutoResumeCheckedOwners;
 }
 
 function jobKey(ownerId: number) {
@@ -517,7 +513,7 @@ async function runThreadsJob(ownerId: number, accounts: ThreadsAutoAccount[], co
 
 export async function startThreadsAutoRun(ownerId: number, accounts: ThreadsAutoAccount[], config: StartThreadsAutoConfig) {
   const current = getState(ownerId);
-  getResumeCheckedOwners().add(ownerId);
+  resumingThreadsOwners.delete(ownerId);
   if (current.running) throw new Error("Auto Threads đang chạy.");
 
   const { state, totalPosts, runToken } = await resetThreadsRunState(ownerId, accounts, config);
@@ -566,42 +562,84 @@ export async function getThreadsAutoStatus(ownerId: number) {
   return snapshot(ownerId);
 }
 
-export function bootstrapThreadsAutoResume() {
-  if (!globalForThreads.threadsAutoResumeBootstrapPromise) {
-    globalForThreads.threadsAutoResumeBootstrapPromise = (async () => {
-      const ownerIds = await readResumableJobOwnerIds();
-      await Promise.allSettled(ownerIds.map((ownerId) => ensureThreadsAutoResume(ownerId)));
-    })();
+let inFlightThreadsBootstrapPromise: Promise<void> | null = null;
+
+export function startThreadsAutoBackgroundWatcher() {
+  if (globalForThreads.threadsAutoResumeWatcherStarted) return;
+  globalForThreads.threadsAutoResumeWatcherStarted = true;
+
+  const timer = setInterval(() => {
+    void bootstrapThreadsAutoResume().catch((err) => {
+      console.error("[threads-auto background watcher error]:", err);
+    });
+  }, 20_000);
+
+  if (typeof timer.unref === "function") {
+    timer.unref();
   }
-  return globalForThreads.threadsAutoResumeBootstrapPromise;
+}
+
+export function bootstrapThreadsAutoResume(): Promise<void> {
+  startThreadsAutoBackgroundWatcher();
+
+  if (inFlightThreadsBootstrapPromise) {
+    return inFlightThreadsBootstrapPromise;
+  }
+
+  inFlightThreadsBootstrapPromise = (async () => {
+    try {
+      const ownerIds = await readResumableJobOwnerIds();
+      if (ownerIds.length === 0) return;
+      await Promise.allSettled(ownerIds.map((ownerId) => ensureThreadsAutoResume(ownerId)));
+    } catch (error) {
+      console.error("Lỗi trong quá trình bootstrap Auto Threads resume:", error);
+    } finally {
+      inFlightThreadsBootstrapPromise = null;
+    }
+  })();
+
+  return inFlightThreadsBootstrapPromise;
 }
 
 async function ensureThreadsAutoResume(ownerId: number) {
-  const checkedOwners = getResumeCheckedOwners();
-  if (checkedOwners.has(ownerId)) return;
-  checkedOwners.add(ownerId);
-  const saved = await readCurrentJob(ownerId);
-  if (!saved) return;
+  const state = getState(ownerId);
+  if (state.running) return;
+  if (resumingThreadsOwners.has(ownerId)) return;
+  resumingThreadsOwners.add(ownerId);
 
-  const accounts = await getThreadsAutoAccountsForRun(saved.accountIds, ownerId);
-  if (!accounts.length) {
-    await clearCurrentJob(ownerId);
-    return;
-  }
+  try {
+    const saved = await readCurrentJob(ownerId);
+    if (!saved) return;
+    if (state.running) return;
 
-  saved.completedByAccount = accounts.map((_, index) => Number(saved.completedByAccount[index] || 0));
-  const { state, totalPosts, runToken } = await resetThreadsRunState(ownerId, accounts, saved.config, saved.startedAt);
-  const perAccount = actionsPerAccount(saved.config);
-  const completed = saved.completedByAccount.reduce((sum, count) => sum + Math.min(Math.max(count || 0, 0), perAccount), 0);
-  state.currentPost = completed;
-  state.progress = Math.round((completed / Math.max(totalPosts, 1)) * 100);
-  state.paused = saved.status === "paused";
-  for (let index = 0; index < accounts.length; index += 1) {
-    const account = accounts[index];
-    const done = Math.min(Math.max(saved.completedByAccount[index] || 0, 0), perAccount);
-    state.accountProgress[account.userId] = Math.round((done / Math.max(perAccount, 1)) * 100);
+    const accounts = await getThreadsAutoAccountsForRun(saved.accountIds, ownerId);
+    if (!accounts.length) {
+      await clearCurrentJob(ownerId);
+      return;
+    }
+
+    saved.completedByAccount = accounts.map((_, index) => Number(saved.completedByAccount[index] || 0));
+    const { state: initializedState, totalPosts, runToken } = await resetThreadsRunState(ownerId, accounts, saved.config, saved.startedAt);
+    const perAccount = actionsPerAccount(saved.config);
+    const completed = saved.completedByAccount.reduce((sum, count) => sum + Math.min(Math.max(count || 0, 0), perAccount), 0);
+    initializedState.currentPost = completed;
+    initializedState.progress = Math.round((completed / Math.max(totalPosts, 1)) * 100);
+    initializedState.paused = saved.status === "paused";
+    for (let index = 0; index < accounts.length; index += 1) {
+      const account = accounts[index];
+      const done = Math.min(Math.max(saved.completedByAccount[index] || 0, 0), perAccount);
+      initializedState.accountProgress[account.userId] = Math.round((done / Math.max(perAccount, 1)) * 100);
+    }
+    getJobs().set(ownerId, saved);
+    log(initializedState, ownerId, "warn", `Server hoặc tác vụ đã được khôi phục. Tiếp tục từ tác vụ ${initializedState.currentPost + 1}/${initializedState.totalPosts}.`);
+    void runThreadsJob(ownerId, accounts, saved.config, saved, runToken);
+  } catch (error) {
+    console.error(`Lỗi khi khôi phục Auto Threads cho owner ${ownerId}:`, error);
+  } finally {
+    resumingThreadsOwners.delete(ownerId);
   }
-  getJobs().set(ownerId, saved);
-  log(state, ownerId, "warn", `Server đã khởi động lại. Tiếp tục từ tác vụ ${state.currentPost + 1}/${state.totalPosts}.`);
-  void runThreadsJob(ownerId, accounts, saved.config, saved, runToken);
 }
+
+// Auto-start background watcher when module is imported
+startThreadsAutoBackgroundWatcher();
+

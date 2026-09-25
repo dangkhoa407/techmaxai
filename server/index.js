@@ -28,7 +28,9 @@ const DB_IDLE_TIMEOUT_MS = Math.max(10000, Number(process.env.DB_IDLE_TIMEOUT_MS
 const DEFAULT_PUBLIC_API_BASE_URL = "https://api.conkudaden.online/api";
 const PUBLIC_API_BASE_URL = (process.env.PUBLIC_API_BASE_URL || process.env.NEXT_PUBLIC_API_BASE_URL || DEFAULT_PUBLIC_API_BASE_URL).replace(/\/$/, "");
 const PUBLIC_WEB_BASE_URL = (process.env.PUBLIC_WEB_BASE_URL || process.env.NEXT_PUBLIC_WEB_BASE_URL || PUBLIC_API_BASE_URL.replace(/\/api\/?$/i, "")).replace(/\/$/, "");
-const NEXT_INTERNAL_BASE_URL = (process.env.NEXT_INTERNAL_BASE_URL || process.env.NEXT_PUBLIC_WEB_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
+const DEFAULT_BOOTSTRAP_SECRET = "techmax-auto-bootstrap-internal-secret-2026";
+const FACEBOOK_AUTO_BOOTSTRAP_SECRET = process.env.FACEBOOK_AUTO_BOOTSTRAP_SECRET || DEFAULT_BOOTSTRAP_SECRET;
+const NEXT_INTERNAL_BASE_URL = (process.env.NEXT_INTERNAL_BASE_URL || "http://127.0.0.1:3000").replace(/\/$/, "");
 const SESSION_DAYS = 365;
 const DEPOSIT_INVOICE_POLL_INTERVAL_MS = 30000;
 const DEPOSIT_INVOICE_EXPIRE_MINUTES = Math.max(1, Math.floor(Number(process.env.DEPOSIT_INVOICE_EXPIRE_MINUTES || 15)));
@@ -1755,6 +1757,17 @@ async function ensureSchema() {
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS facebook_auto_jobs (
+      job_key VARCHAR(64) PRIMARY KEY,
+      status ENUM('running', 'paused', 'completed', 'stopped') NOT NULL,
+      job_json LONGTEXT DEFAULT NULL,
+      started_at DATETIME DEFAULT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_vietnamese_ci
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS threads_auto_jobs (
       job_key VARCHAR(64) PRIMARY KEY,
       status ENUM('running', 'paused', 'completed', 'stopped') NOT NULL,
       job_json LONGTEXT DEFAULT NULL,
@@ -5743,10 +5756,9 @@ async function mbBankGetCaptcha(deviceId) {
 
 async function bootstrapFacebookAutoFromNext() {
   const url = `${NEXT_INTERNAL_BASE_URL}/api/facebook-auto/bot/bootstrap`;
-  const headers = {};
-  if (process.env.FACEBOOK_AUTO_BOOTSTRAP_SECRET) {
-    headers["x-facebook-auto-bootstrap-secret"] = process.env.FACEBOOK_AUTO_BOOTSTRAP_SECRET;
-  }
+  const headers = {
+    "x-facebook-auto-bootstrap-secret": FACEBOOK_AUTO_BOOTSTRAP_SECRET
+  };
   let lastError = null;
   for (let attempt = 1; attempt <= 12; attempt += 1) {
     try {
@@ -5758,7 +5770,7 @@ async function bootstrapFacebookAutoFromNext() {
       return;
     } catch (error) {
       lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+      await new Promise((resolve) => setTimeout(resolve, 3000));
     }
   }
   throw lastError || new Error("Auto Facebook bootstrap failed.");
@@ -5766,10 +5778,9 @@ async function bootstrapFacebookAutoFromNext() {
 
 async function bootstrapThreadsAutoFromNext() {
   const url = `${NEXT_INTERNAL_BASE_URL}/api/threads-auto/bootstrap`;
-  const headers = {};
-  if (process.env.FACEBOOK_AUTO_BOOTSTRAP_SECRET) {
-    headers["x-facebook-auto-bootstrap-secret"] = process.env.FACEBOOK_AUTO_BOOTSTRAP_SECRET;
-  }
+  const headers = {
+    "x-facebook-auto-bootstrap-secret": FACEBOOK_AUTO_BOOTSTRAP_SECRET
+  };
   let lastError = null;
   for (let attempt = 1; attempt <= 12; attempt += 1) {
     try {
@@ -5781,10 +5792,44 @@ async function bootstrapThreadsAutoFromNext() {
       return;
     } catch (error) {
       lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+      await new Promise((resolve) => setTimeout(resolve, 3000));
     }
   }
   throw lastError || new Error("Auto Threads bootstrap failed.");
+}
+
+let autoBotResumeWatcherTimer = null;
+function startAutoBotResumeWatcher() {
+  if (autoBotResumeWatcherTimer) return;
+  autoBotResumeWatcherTimer = setInterval(async () => {
+    try {
+      const [fbRows] = await query(
+        "SELECT 1 FROM facebook_auto_jobs WHERE status IN ('running', 'paused') LIMIT 1"
+      );
+      if (fbRows && fbRows.length > 0) {
+        await bootstrapFacebookAutoFromNext().catch(() => undefined);
+      }
+
+      const [threadsRows] = await query(
+        "SELECT 1 FROM threads_auto_jobs WHERE status IN ('running', 'paused') LIMIT 1"
+      );
+      if (threadsRows && threadsRows.length > 0) {
+        await bootstrapThreadsAutoFromNext().catch(() => undefined);
+      }
+    } catch {
+      // Ignore background poll errors
+    }
+  }, 30000);
+  if (typeof autoBotResumeWatcherTimer.unref === "function") {
+    autoBotResumeWatcherTimer.unref();
+  }
+}
+
+function stopAutoBotResumeWatcher() {
+  if (autoBotResumeWatcherTimer) {
+    clearInterval(autoBotResumeWatcherTimer);
+    autoBotResumeWatcherTimer = null;
+  }
 }
 
 async function isMbCaptchaServiceReady() {
@@ -19578,6 +19623,7 @@ ensureSchema()
     installZcaFetchInterceptor();
     startPendingAutoCreditWorkers();
     startZaloCampaignWorker();
+    startAutoBotResumeWatcher();
     scheduleAiBotUsageLogCleanup();
     server.listen(PORT, () => {
       console.log(`TechMax Node API running at http://localhost:${PORT}/api`);
@@ -19593,6 +19639,7 @@ ensureSchema()
       writeLog("[server shutdown]", { signal });
       stopZaloCampaignWorker("server_stopped");
       stopDepositInvoiceAutoCreditWorker();
+      stopAutoBotResumeWatcher();
       if (aiUsageLogCleanupTimer) clearInterval(aiUsageLogCleanupTimer);
       server.close(() => {
         pool?.end?.().finally(() => process.exit(0));
