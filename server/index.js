@@ -12,6 +12,8 @@ const { spawn } = require("child_process");
 const { Server: SocketIOServer } = require("socket.io");
 const fs = require("fs");
 const path = require("path");
+const sharp = require("sharp");
+const ort = require("onnxruntime-node");
 require("dotenv").config({ path: ".env.local" });
 require("dotenv").config();
 
@@ -38,10 +40,17 @@ const ZALO_CAMPAIGN_POLL_INTERVAL_MS = Number(process.env.ZALO_CAMPAIGN_POLL_INT
 const MB_BANK_AUTHORIZATION = "Basic RU1CUkVUQUlMV0VCOlNEMjM0ZGZnMzQlI0BGR0AzNHNmc2RmNDU4NDNm";
 const MB_BANK_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36";
 const MB_BANK_SOURCE_DIR = process.env.MB_BANK_SOURCE_DIR || path.join(__dirname, "mbbank");
-const MB_BANK_CAPTCHA_URL = process.env.MB_BANK_CAPTCHA_URL || "http://127.0.0.1:2108";
+const MB_CAPTCHA_MODEL_PATH = process.env.MB_CAPTCHA_MODEL_PATH || path.join(MB_BANK_SOURCE_DIR, "captcha", "model.onnx");
 let mbBankWasmBufferCache = null;
 let mbBankWasmEncrypt = null;
-let mbBankCaptchaServicePromise = null;
+let mbBankCaptchaSession = null;
+let mbBankCaptchaSessionPromise = null;
+
+const MB_CAPTCHA_CHARSET = [];
+for (let i = 0; i < 10; i++) MB_CAPTCHA_CHARSET.push(String(i));
+for (let i = 97; i <= 122; i++) MB_CAPTCHA_CHARSET.push(String.fromCharCode(i));
+for (let i = 65; i <= 90; i++) MB_CAPTCHA_CHARSET.push(String.fromCharCode(i));
+MB_CAPTCHA_CHARSET.sort();
 
 const TRIAL_SERVICE_PLAN = {
   code: "trial",
@@ -5832,53 +5841,79 @@ function stopAutoBotResumeWatcher() {
   }
 }
 
-async function isMbCaptchaServiceReady() {
-  try {
-    const health = await fetchJsonWithTimeout(`${MB_BANK_CAPTCHA_URL}/health`, { method: "GET" }, 2000);
-    return health?.status === "ok";
-  } catch {
-    return false;
+async function getMbCaptchaSession() {
+  if (mbBankCaptchaSession) return mbBankCaptchaSession;
+  if (!fs.existsSync(MB_CAPTCHA_MODEL_PATH)) {
+    throw new Error(`Không tìm thấy file model captcha MB tại ${MB_CAPTCHA_MODEL_PATH}.`);
   }
+  if (!mbBankCaptchaSessionPromise) {
+    mbBankCaptchaSessionPromise = ort.InferenceSession.create(MB_CAPTCHA_MODEL_PATH)
+      .then((session) => {
+        mbBankCaptchaSession = session;
+        return session;
+      })
+      .finally(() => {
+        mbBankCaptchaSessionPromise = null;
+      });
+  }
+  return mbBankCaptchaSessionPromise;
 }
 
-async function ensureMbCaptchaService() {
-  if (await isMbCaptchaServiceReady()) return;
-  if (!mbBankCaptchaServicePromise) {
-    mbBankCaptchaServicePromise = (async () => {
-      const captchaDir = path.join(MB_BANK_SOURCE_DIR, "captcha");
-      const captchaEntry = path.join(captchaDir, "index.js");
-      if (!fs.existsSync(captchaEntry)) {
-        throw new Error(`Không tìm thấy source giải captcha MB tại ${captchaEntry}.`);
-      }
+async function recognizeMbCaptchaBuffer(imageBuffer) {
+  const session = await getMbCaptchaSession();
 
-      spawn(process.execPath, [captchaEntry], {
-        cwd: captchaDir,
-        detached: true,
-        stdio: "ignore",
-        windowsHide: true,
-      }).unref();
+  const raw = await sharp(imageBuffer)
+    .grayscale()
+    .resize(160, 50)
+    .raw()
+    .toBuffer();
 
-      for (let i = 0; i < 30; i += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        if (await isMbCaptchaServiceReady()) return;
-      }
-      throw new Error(`Không bật được service giải captcha MB local tại ${MB_BANK_CAPTCHA_URL}.`);
-    })().finally(() => {
-      mbBankCaptchaServicePromise = null;
-    });
+  const pixels = new Float32Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    pixels[i] = raw[i] / 255.0;
   }
-  await mbBankCaptchaServicePromise;
+
+  const tensor = new ort.Tensor("float32", pixels, [1, 1, 50, 160]);
+  const inputName = session.inputNames[0];
+  const results = await session.run({ [inputName]: tensor });
+
+  const output = Object.values(results)[0];
+  const data = output.data;
+  const dims = output.dims;
+  const seqLen = dims[1];
+  const numClasses = dims[2];
+
+  let text = "";
+  for (let s = 0; s < seqLen; s++) {
+    let maxIdx = 0;
+    let maxVal = data[s * numClasses];
+    for (let c = 1; c < numClasses; c++) {
+      const val = data[s * numClasses + c];
+      if (val > maxVal) {
+        maxVal = val;
+        maxIdx = c;
+      }
+    }
+    if (maxIdx >= 0 && maxIdx < MB_CAPTCHA_CHARSET.length) {
+      text += MB_CAPTCHA_CHARSET[maxIdx];
+    }
+  }
+
+  return text.length === 6 ? text : null;
 }
 
 async function mbBankSolveCaptcha(imageString) {
-  if (!imageString) throw new Error("MB Bank không trừ captcha.");
-  await ensureMbCaptchaService();
-  const payload = await fetchJsonWithTimeout(`${MB_BANK_CAPTCHA_URL}/recognize`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ image: `data:image/png;base64,${imageString}` }),
-  }, 30000);
-  return cleanString(payload?.text || payload?.result || payload?.raw);
+  if (!imageString) throw new Error("MB Bank không trả captcha.");
+  let base64Data = String(imageString || "").trim();
+  if (base64Data.includes("base64,")) {
+    base64Data = base64Data.split("base64,")[1];
+  }
+  const imageBuffer = Buffer.from(base64Data, "base64");
+  const text = await recognizeMbCaptchaBuffer(imageBuffer);
+  if (!text) {
+    throw new Error("Không giải được captcha MB Bank.");
+  }
+  return text;
 }
 
 function mbBankLoginErrorMessage(payload) {
