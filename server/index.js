@@ -277,12 +277,13 @@ function nowSql(date = new Date()) {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-    hour12: false,
+    hourCycle: "h23",
   }).formatToParts(d).reduce((acc, part) => {
     if (part.type !== "literal") acc[part.type] = part.value;
     return acc;
   }, {});
-  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+  const hour = parts.hour === "24" ? "00" : (parts.hour || "00");
+  return `${parts.year}-${parts.month}-${parts.day} ${hour}:${parts.minute}:${parts.second}`;
 }
 
 function addDays(date, days) {
@@ -2926,16 +2927,17 @@ function getVnDateParts(date = new Date()) {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-    hour12: false,
+    hourCycle: "h23",
   }).formatToParts(d).reduce((acc, part) => {
     if (part.type !== "literal") acc[part.type] = part.value;
     return acc;
   }, {});
+  const hour = parts.hour === "24" ? "00" : (parts.hour || "00");
   return {
     year: Number(parts.year),
     month: Number(parts.month),
     day: Number(parts.day),
-    hour: Number(parts.hour),
+    hour: Number(hour),
     minute: Number(parts.minute),
     second: Number(parts.second),
     dateText: `${parts.year}-${parts.month}-${parts.day}`,
@@ -4260,7 +4262,7 @@ function formatAiCurrentTime(date = new Date()) {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-    hour12: false,
+    hourCycle: "h23",
   });
   const dateFormatter = new Intl.DateTimeFormat("vi-VN", {
     timeZone: APP_TIME_ZONE,
@@ -4298,7 +4300,7 @@ function formatAiMessageTime(dateInput, now = new Date()) {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-    hour12: false,
+    hourCycle: "h23",
   });
   const timeStr = timeFormatter.format(d);
 
